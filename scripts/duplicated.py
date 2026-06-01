@@ -1,1 +1,14 @@
-../.git/annex/objects/gW/Km/SHA256E-s407--97086ff99e89514d6d754a7f69d8fa1bd7feaf293e25d5ef4785f9118a809494.py/SHA256E-s407--97086ff99e89514d6d754a7f69d8fa1bd7feaf293e25d5ef4785f9118a809494.py
+import pandas as pd
+
+df = pd.read_csv("data/processed/ants_interactions.csv", low_memory=False)
+
+print(f"Total before: {len(df)}")
+
+df_no_duplicates = df.drop_duplicates(
+    subset=["source_taxon_name", "interaction_type", "target_taxon_name"]
+)
+
+print(f"Total after: {len(df_no_duplicates)}")
+
+df_no_duplicates.to_csv("data/processed/ants_no_duplicates.csv", index=False)
+print("File saved!")
