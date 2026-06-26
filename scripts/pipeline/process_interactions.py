@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import os
 import pandas as pd
@@ -29,13 +31,13 @@ def parse_args():
     )
     parser.add_argument(
         "--input", "-i",
-        default="data/raw/interactions.csv",
-        help="Path to the raw input CSV file (default: data/raw/interactions.csv)"
+        required=True,
+        help="Path to the raw input CSV file"
     )
     parser.add_argument(
         "--output", "-o",
-        default="data/processed/pairs_unique.csv",
-        help="Path to the output CSV file with unique pairs (default: data/processed/pairs_unique.csv)"
+        required=True,
+        help="Path to the output CSV file with unique pairs"
     )
     parser.add_argument(
         "--columns", "-c",
@@ -160,7 +162,6 @@ def main():
     df = filter_interactions(df, args.ants, args.microorganisms, args.verbose)
     pairs = extract_pairs(df, args.separator, args.verbose)
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
     pairs.to_csv(args.output, index=False)
     print(f"\nFile saved in {args.output}")
 
