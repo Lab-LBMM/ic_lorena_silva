@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
 import pandas as pd
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 DEFAULT_COLUMNS = [
     "source_taxon_name",
@@ -12,22 +11,26 @@ DEFAULT_COLUMNS = [
     "interaction_type",
     "target_taxon_name",
     "target_taxon_path",
-    "latitude",
-    "longitude",
-    "event_date",
     "study_citation",
-    "study_url"
+    "study_url",
+    "study_source_archive_uri"
 ]
 
-DEFAULT_INVALID_TERMS = ["animalia", "plantae", "fungi", "unknown", ""]
+ORIGIN_COLUMNS = [
+    "source_taxon_name",
+    "interaction_type",
+    "target_taxon_name",
+    "study_citation",
+    "study_url",
+    "study_source_archive_uri"
+]
 
-ANTS = "Formicidae"
-MICROORGANISMS = ["Fungi", "Bacteria"]
+DEFAULT_INVALID_TERMS = ["animalia", "plantae", "fungi", "unknown", "no name"]
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Full pipeline: from raw GloBI interactions to unique ant-microorganism interaction pairs."
+        description="Pipeline for filtering, cleaning, and extracting unique Subject-Relation-Object pairs from interaction datasets."
     )
     parser.add_argument(
         "--input", "-i",
@@ -43,30 +46,35 @@ def parse_args():
         "--columns", "-c",
         nargs="+",
         default=DEFAULT_COLUMNS,
-        help="List of columns to keep (default: predefined relevant columns)"
+        help="Columns to keep from the raw dataset (default: 10 predefined columns)"
     )
     parser.add_argument(
         "--invalid-terms", "-t",
         nargs="+",
         default=DEFAULT_INVALID_TERMS,
-        help="List of taxon names to exclude (default: animalia plantae fungi unknown 'no name')"
+        help="Taxon names to exclude (default: animalia plantae fungi unknown 'no name')"
     )
     parser.add_argument(
-        "--ants", "-a",
-        default=ANTS,
-        help="Taxon name to filter as ants (default: Formicidae)"
+        "--focal-taxon", "-a",
+        default="Formicidae",
+        help="Focal taxon to filter (default: Formicidae)"
     )
     parser.add_argument(
-        "--microorganisms", "-m",
+        "--interacting-taxa", "-m",
         nargs="+",
-        default=MICROORGANISMS,
-        help="List of taxon names to filter as microorganisms (default: Fungi Bacteria)"
+        default=["Fungi", "Bacteria"],
+        help="Taxa interacting with the focal taxon (default: Fungi Bacteria)"
     )
     parser.add_argument(
         "--separator", "-s",
-        default=" | ",
-        help="Separator used to join the pair fields (default: ' | ')"
+        default=" , ",
+        help="Separator used to join the SRO fields (default: ' , ')"
     )
+    parser.add_argument(
+    "--output-full",
+    default=None,
+    help="Optional path to save the full filtered dataset before pair extraction"
+)
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
@@ -86,12 +94,6 @@ def contains_term(series, terms):
     return series.str.contains("|".join(terms), na=False, case=False)
 
 
-def preprocess(df, verbose):
-    if verbose:
-        print(f"[preprocess] Total rows: {len(df)}")
-    return df
-
-
 def select_columns(df, columns, verbose):
     df = df[columns]
     if verbose:
@@ -99,16 +101,16 @@ def select_columns(df, columns, verbose):
     return df
 
 
-def validate_taxa(df, invalid_terms, verbose):
+def validate_taxon(df, invalid_terms, verbose):
     if verbose:
-        print(f"[validate_taxa] Total before: {len(df)}")
+        print(f"[validate_taxon] Total before: {len(df)}")
     df = df.dropna(subset=["source_taxon_name", "target_taxon_name"])
     df = df[
         ~df["source_taxon_name"].str.lower().isin(invalid_terms) &
         ~df["target_taxon_name"].str.lower().isin(invalid_terms)
     ]
     if verbose:
-        print(f"[validate_taxa] Total after: {len(df)}")
+        print(f"[validate_taxon] Total after: {len(df)}")
     return df
 
 
@@ -123,14 +125,14 @@ def deduplicate(df, verbose):
     return df
 
 
-def filter_interactions(df, ants, microorganisms, verbose):
+def filter_interactions(df, focal_taxon, interacting_taxa, verbose):
     if verbose:
         print(f"[filter_interactions] Total before: {len(df)}")
     condition = (
-        (contains_term(df["source_taxon_path"], ants) &
-         contains_term(df["target_taxon_path"], microorganisms)) |
-        (contains_term(df["source_taxon_path"], microorganisms) &
-         contains_term(df["target_taxon_path"], ants))
+        (contains_term(df["source_taxon_path"], focal_taxon) &
+         contains_term(df["target_taxon_path"], interacting_taxa)) |
+        (contains_term(df["source_taxon_path"], interacting_taxa) &
+         contains_term(df["target_taxon_path"], focal_taxon))
     )
     df = df[condition]
     if verbose:
@@ -146,22 +148,21 @@ def extract_pairs(df, separator, verbose):
     ).drop_duplicates().reset_index(drop=True)
     if verbose:
         print(f"[extract_pairs] Total unique pairs: {len(pairs)}")
-        print(pairs.head(10))
     return pairs
 
 
 def main():
-    args = parse_args()
-
-    df = pd.read_csv(args.input, low_memory=False)
-
-    df = preprocess(df, args.verbose)
-    df = select_columns(df, args.columns, args.verbose)
-    df = validate_taxa(df, args.invalid_terms, args.verbose)
+ args = parse_args()
+ df = pd.read_csv(args.input, low_memory=False)
+ 
+ if args.verbose:
+    print(f"[read] Total rows: {len(df)}")
+    df = validate_taxon(df, args.invalid_terms, args.verbose)
     df = deduplicate(df, args.verbose)
-    df = filter_interactions(df, args.ants, args.microorganisms, args.verbose)
+    df = filter_interactions(df, args.focal_taxon, args.interacting_taxa, args.verbose)
+ if args.output_full:
+    df[ORIGIN_COLUMNS].to_csv(args.output_full, index=False)
     pairs = extract_pairs(df, args.separator, args.verbose)
-
     pairs.to_csv(args.output, index=False)
     print(f"\nFile saved in {args.output}")
 
