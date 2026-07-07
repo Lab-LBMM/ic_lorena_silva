@@ -20,14 +20,14 @@ ORIGIN_COLUMNS = [
 DEFAULT_INVALID_TERMS = ["animalia", "plantae", "fungi", "unknown", "no name"]
 
 DEFAULT_RULES = [
-    ["Rede trófica", ["trophich", "globalbioticinteractions"]],
-    ["Observação de ocorrência", [
+    ["Trophic Network", ["trophich", "globalbioticinteractions"]],
+    ["Occurrence Observation", [
         "inaturalist", "vertnet", "bold", "scan", "fmnh", "mcz",
         "ucsb-izc", "ecdysis", "osal", "emtuckerlab"
     ]],
-    ["Repositório de dados", ["zenodo", "10.5285", "10.15468"]],
-    ["Científica (artigo com DOI)", ["doi"]],
-    ["Catálogo institucional", ["gbif", "museum", "catalog", "collection", "specimen"]],
+    ["Data Repository", ["zenodo", "10.5285", "10.15468"]],
+    ["Scientific (article with DOI)", ["doi"]],
+    ["Institutional Catalog", ["gbif", "museum", "catalog", "collection", "specimen"]],
 ]
 
 def parse_args():
@@ -44,8 +44,8 @@ def parse_args():
     parser.add_argument("--classify-source", action="store_true")
     parser.add_argument("--url-column", default="study_url")
     parser.add_argument("--rules-file", default=None)
-    parser.add_argument("--empty-category", default="Mineração de texto")
-    parser.add_argument("--fallback-category", default="Outro / não classificado")
+    parser.add_argument("--empty-category", default="Without URL")
+    parser.add_argument("--fallback-category", default="Other / not classified")
     parser.add_argument("--summary-output", default=None)
     parser.add_argument("--classified-output", default=None)
     parser.add_argument("--version", "-V", action="version", version=f"%(prog)s {__version__}")
@@ -101,11 +101,11 @@ def extract_pairs(df, separator):
 
 def load_rules(rules_file):
     if rules_file is None:
-        print("[load_rules] Usando regras padrão embutidas")
+        print("[load_rules] Using default rules")
         return DEFAULT_RULES
     with open(rules_file, "r", encoding="utf-8") as f:
         rules = json.load(f)
-    print(f"[load_rules] Regras carregadas de {rules_file}: {len(rules)} categorias")
+    print(f"[load_rules] Rules loaded from {rules_file}: {len(rules)} categories")
     return rules
 
 
@@ -123,20 +123,20 @@ def classify_value(value, rules, empty_category, fallback_category):
 
 def classify_dataframe(df, url_column, rules, empty_category, fallback_category):
     if url_column not in df.columns:
-        sys.exit(f"Erro: coluna '{url_column}' não encontrada no CSV.")
-    print(f"[classify_dataframe] Classificando {len(df)} registros pela coluna '{url_column}'")
+        sys.exit(f"Error: column '{url_column}' not found in CSV.")
+    print(f"[classify_dataframe] Classifying {len(df)} records by column '{url_column}'")
     df = df.copy()
-    df["categoria"] = df[url_column].apply(
+    df["category"] = df[url_column].apply(
         lambda v: classify_value(v, rules, empty_category, fallback_category)
     )
     return df
 
 
 def build_summary(df):
-    tabela = df["categoria"].value_counts().reset_index()
-    tabela.columns = ["Tipo de fonte", "n"]
+    tabela = df["category"].value_counts().reset_index()
+    tabela.columns = ["Source Type", "n"]
     tabela["%"] = (tabela["n"] / len(df) * 100).round(1)
-    print(f"[build_summary] {len(tabela)} categorias encontradas")
+    print(f"[build_summary] {len(tabela)} categories found")
     return tabela
 
 
@@ -148,7 +148,7 @@ def run_classification(df_origin, args):
     )
     tabela = build_summary(df_classified)
 
-    print("=== TABELA DE TIPO DE FONTE ===")
+    print("=== SOURCE TYPE TABLE ===")
     print(tabela.to_string(index=False))
 
     if args.classified_output:
