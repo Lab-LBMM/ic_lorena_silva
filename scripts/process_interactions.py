@@ -71,9 +71,9 @@ def parse_args():
         help="Separator used to join the SRO fields (default: ' , ')"
     )
     parser.add_argument(
-    "--output-full",
+    "--output-origin",
     default=None,
-    help="Optional path to save the full filtered dataset before pair extraction"
+    help="Optional path to save the dataset with the origin of data before pair extraction"
 )
     parser.add_argument(
         "--verbose", "-v",
@@ -160,8 +160,8 @@ def main():
     df = validate_taxon(df, args.invalid_terms, args.verbose)
     df = deduplicate(df, args.verbose)
     df = filter_interactions(df, args.focal_taxon, args.interacting_taxa, args.verbose)
- if args.output_full:
-    df[ORIGIN_COLUMNS].to_csv(args.output_full, index=False)
+ if args.output_origin:
+    df[ORIGIN_COLUMNS].to_csv(args.output_origin, index=False)
     pairs = extract_pairs(df, args.separator, args.verbose)
     pairs.to_csv(args.output, index=False)
     print(f"\nFile saved in {args.output}")
