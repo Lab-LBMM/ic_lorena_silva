@@ -32,8 +32,7 @@ DEFAULT_RULES = [
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Pipeline for filtering, cleaning, and extracting unique Subject–Relation–Object
-                    "pairs from interaction datasets, with source type classification."
+        description="Pipeline for filtering, cleaning, and extracting unique Subject–Relation–Object pairs from interaction datasets, with source type classification."
     )
     parser.add_argument("--input", "-i", required=True)
     parser.add_argument("--output", "-o", required=True)
