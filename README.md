@@ -58,7 +58,7 @@ The pipeline uses raw ecological interaction data extracted from [GloBI](https:/
 
 ## CIC IGCE 2026
 
-The [`cic-2026/analysis`](./cic-2026/analysis) directory contains the step-by-step analysis workflow presented at the CIC, exported from the documentation maintained in the laboratory's Notion workspace. A PDF copy of the poster presented at the **UNESP Undergraduate Research Conference (CIC)** is available in [`cic-2026/poster/`](./cic-2026/poster).
+The [`cic-2026/`](./cic-2026/) directory contains the step-by-step analysis workflow presented at the CIC, exported from the documentation maintained in the laboratory's Notion workspace. A PDF copy of the poster presented at the **UNESP Undergraduate Research Conference (CIC)** is available in [`cic-2026/poster/`](./cic-2026/poster).
 
 The poster summarizes the results of the GloBI data screening for insects and microorganisms and the evaluation of candidate LLMs.
 
