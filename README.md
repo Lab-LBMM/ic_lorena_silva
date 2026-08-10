@@ -43,7 +43,7 @@ cic/                         # step-by-step analysis documentation exported from
 
 ## Documentation
 
-https://github.com/Lab-LBMM/ic_lorena_silva.wiki.git
+https://github.com/Lab-LBMM/ic_lorena_silva/git
 
 ## Acknowledgments
 
