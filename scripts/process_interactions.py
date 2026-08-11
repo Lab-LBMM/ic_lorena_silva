@@ -1,42 +1,36 @@
 #!/usr/bin/env python3
 
 import argparse
-import json
 import os
-import sys
 import tempfile
 
 import duckdb
 import pandas as pd
 
-__version__ = "1.6.0"
+__version__ = "2.0.0"
 
 ORIGIN_COLUMNS = [
     "source_taxon_name",
     "interaction_type",
     "target_taxon_name",
     "study_citation",
-    "study_url",
     "study_source_archive_uri"
 ]
 
 DEFAULT_INVALID_TERMS = ["animalia", "plantae", "fungi", "unknown", "no name"]
 
-DEFAULT_RULES = [
-    ["GloBi", ["trophich", "globalbioticinteractions"]],
-    ["Occurrence Observation", [
-        "inaturalist", "vertnet", "bold", "scan", "fmnh", "mcz",
-        "ucsb-izc", "ecdysis", "osal", "emtuckerlab"
-    ]],
-    ["Data Repository", ["zenodo", "10.5285", "10.15468"]],
-    ["Scientific (article with DOI)", ["doi"]],
-    ["Institutional Catalog", ["gbif", "museum", "catalog", "collection", "specimen"]],
-]
+# Prefixos usados para classificar a rastreabilidade da origem a partir de study_citation.
+PMC_ARTICLE_PREFIX = "https://pmc.ncbi.nlm.nih.gov/articles/"
+NUCCORE_PREFIX = "http://www.ncbi.nlm.nih.gov/nuccore/"
+
+TRACEABLE_LABEL = "Rastreavel (artigo PMC)"
+MAYBE_TRACEABLE_LABEL = "Possivelmente rastreavel (nuccore) - checagem manual"
+NOT_TRACEABLE_LABEL = "Nao rastreavel"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Pipeline for filtering, cleaning, and extracting unique Subject–Relation–Object pairs from interaction datasets, with source type classification."
+        description="Pipeline for filtering, cleaning, and extracting unique Subject–Relation–Object pairs from interaction datasets, with source traceability classification."
     )
     parser.add_argument("--input", "-i", required=True)
     parser.add_argument("--output", "-o", required=True)
@@ -46,17 +40,19 @@ def parse_args():
     parser.add_argument("--any-side", action="store_true")
     parser.add_argument("--separator", "-s", default=" , ")
     parser.add_argument("--output-origin", default=None)
-    parser.add_argument("--classify-source", action="store_true")
-    parser.add_argument("--url-column", default="study_url")
-    parser.add_argument("--rules-file", default=None)
-    parser.add_argument("--empty-category", default="Without URL")
-    parser.add_argument("--fallback-category", default="Other / not classified")
-    parser.add_argument("--summary-output", default=None)
-    parser.add_argument("--classified-output", default=None)
     parser.add_argument("--memory-limit", default="4GB",
                          help="Limite de memória para o DuckDB (ex: '4GB', '3GB'). Default: 4GB")
     parser.add_argument("--threads", type=int, default=2,
                          help="Número de threads para o DuckDB. Default: 2")
+    parser.add_argument("--stats", action="store_true",
+                         help="Calcula estatísticas detalhadas do pipeline (funil, top espécies, "
+                              "tipos de interação, colapso na deduplicação) e gera gráficos PNG.")
+    parser.add_argument("--stats-dir", default=None,
+                         help="Pasta onde salvar os gráficos PNG das estatísticas. "
+                              "Default: subpasta 'stats' ao lado de --output.")
+    parser.add_argument("--stats-top-n", type=int, default=15,
+                         help="Quantos itens mostrar/plotar nos rankings (top espécies, tipos "
+                              "de interação etc). Default: 15")
     parser.add_argument("--version", "-V", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args()
 
@@ -65,8 +61,31 @@ def esc(s):
     return str(s).replace("'", "''")
 
 
+def ensure_parent_dir(path):
+    """
+    Garante que o diretório de um arquivo de saída existe, criando-o
+    (inclusive pais) caso necessário. Evita FileNotFoundError ao gravar em
+    uma pasta que ainda não foi criada.
+    """
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def build_like_or(column, terms):
     return " OR ".join(f"{column} ILIKE '%{esc(t)}%'" for t in terms)
+
+
+def count_csv_rows(csv_path, memory_limit, threads):
+    """Conta linhas de um CSV via DuckDB (streaming, sem carregar em pandas)."""
+    con = duckdb.connect()
+    con.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    con.execute(f"PRAGMA threads={threads}")
+    n_rows = con.execute(
+        f"SELECT COUNT(*) FROM read_csv('{esc(csv_path)}', AUTO_DETECT=TRUE)"
+    ).fetchone()[0]
+    con.close()
+    return n_rows
 
 
 def filter_with_duckdb(input_path, invalid_terms, focal_taxon, interacting_taxa, any_side,
@@ -102,7 +121,6 @@ def filter_with_duckdb(input_path, invalid_terms, focal_taxon, interacting_taxa,
             interactionTypeName AS interaction_type,
             targetTaxonName AS target_taxon_name,
             referenceCitation AS study_citation,
-            referenceUrl AS study_url,
             sourceArchiveURI AS study_source_archive_uri
         FROM read_csv('{esc(input_path)}', AUTO_DETECT=TRUE)
         WHERE sourceTaxonName IS NOT NULL
@@ -127,7 +145,7 @@ def filter_with_duckdb(input_path, invalid_terms, focal_taxon, interacting_taxa,
     ).fetchone()[0]
     con2.close()
     print(f"[filter_with_duckdb] Total após filtro: {n_rows}")
-    return tmp_filtered_path
+    return tmp_filtered_path, n_rows
 
 
 def deduplicate_streaming(filtered_csv_path, deduped_csv_path, memory_limit, threads):
@@ -151,7 +169,7 @@ def deduplicate_streaming(filtered_csv_path, deduped_csv_path, memory_limit, thr
     ).fetchone()[0]
     con.close()
     print(f"[deduplicate_streaming] Total after: {n_rows}")
-    return deduped_csv_path
+    return deduped_csv_path, n_rows
 
 
 def extract_pairs_streaming(deduped_csv_path, output_path, separator, memory_limit, threads):
@@ -163,6 +181,7 @@ def extract_pairs_streaming(deduped_csv_path, output_path, separator, memory_lim
     con.execute(f"PRAGMA threads={threads}")
 
     sep_escaped = esc(separator)
+    ensure_parent_dir(output_path)
     con.execute(f"""
         COPY (
             SELECT DISTINCT
@@ -174,79 +193,278 @@ def extract_pairs_streaming(deduped_csv_path, output_path, separator, memory_lim
     print(f"[extract_pairs_streaming] Pares salvos em {output_path}")
 
 
-def load_rules(rules_file):
-    if rules_file is None:
-        print("[load_rules] Using default rules")
-        return DEFAULT_RULES
-    with open(rules_file, "r", encoding="utf-8") as f:
-        rules = json.load(f)
-    print(f"[load_rules] Rules loaded from {rules_file}: {len(rules)} categories")
-    return rules
+def classify_traceability(citation):
+    """
+    Classifica a rastreabilidade da origem de um registro a partir do prefixo
+    da coluna study_citation:
+
+      - Começa com PMC_ARTICLE_PREFIX -> artigo rastreável (link direto para
+        o artigo no PMC).
+      - Começa com NUCCORE_PREFIX -> pode ou não ter um artigo associado; o
+        link pode estar referenciado de alguma forma na página, mas exige
+        checagem manual.
+      - Qualquer outro caso -> não rastreável.
+    """
+    if pd.isna(citation):
+        return NOT_TRACEABLE_LABEL
+    text = str(citation).strip()
+    if text.startswith(PMC_ARTICLE_PREFIX):
+        return TRACEABLE_LABEL
+    if text.startswith(NUCCORE_PREFIX):
+        return MAYBE_TRACEABLE_LABEL
+    return NOT_TRACEABLE_LABEL
 
 
-def classify_value(value, rules, empty_category, fallback_category):
-    if pd.isna(value):
-        return empty_category
-    text = str(value).strip().lower()
-    if text == "" or text == "nan":
-        return empty_category
-    for category, keywords in rules:
-        if any(kw.lower() in text for kw in keywords):
-            return category
-    return fallback_category
+def write_origin_with_traceability(deduped_csv_path, output_path, memory_limit, threads):
+    """
+    Gera o CSV de origem (--output-origin) separando os registros em duas
+    seções dentro do mesmo arquivo, com base em study_citation:
+
+      1) Rastreáveis: aponta direto para um artigo PMC (PMC_ARTICLE_PREFIX).
+      2) Possivelmente rastreáveis: aponta para um registro nuccore
+         (NUCCORE_PREFIX), que pode ou não ter artigo associado e precisa de
+         checagem manual. Esta seção fica abaixo da primeira, separada por
+         uma linha de comentário.
+
+    Registros que não se encaixam em nenhum dos dois casos são descartados
+    do arquivo de saída (apenas contabilizados no log).
+    """
+    con = duckdb.connect()
+    con.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    con.execute(f"PRAGMA threads={threads}")
+    cols_sql = ", ".join(ORIGIN_COLUMNS)
+    df = con.execute(f"""
+        SELECT {cols_sql} FROM read_csv('{esc(deduped_csv_path)}', AUTO_DETECT=TRUE)
+    """).df()
+    con.close()
+
+    df["_traceability"] = df["study_citation"].apply(classify_traceability)
+
+    traceable_df = df[df["_traceability"] == TRACEABLE_LABEL].drop(columns=["_traceability"])
+    maybe_df = df[df["_traceability"] == MAYBE_TRACEABLE_LABEL].drop(columns=["_traceability"])
+    n_discarded = len(df) - len(traceable_df) - len(maybe_df)
+
+    print(f"[write_origin_with_traceability] Rastreáveis (PMC): {len(traceable_df)}")
+    print(f"[write_origin_with_traceability] Possivelmente rastreáveis (nuccore): {len(maybe_df)}")
+    print(f"[write_origin_with_traceability] Não rastreáveis (descartados): {n_discarded}")
+
+    ensure_parent_dir(output_path)
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        traceable_df.to_csv(f, index=False)
+        f.write("\n")
+        f.write(f"# {MAYBE_TRACEABLE_LABEL}\n")
+        maybe_df.to_csv(f, index=False)
+
+    print(f"[write_origin_with_traceability] Arquivo salvo em {output_path}")
+
+    return {
+        TRACEABLE_LABEL: len(traceable_df),
+        MAYBE_TRACEABLE_LABEL: len(maybe_df),
+        NOT_TRACEABLE_LABEL: n_discarded,
+    }
 
 
-def classify_dataframe(df, url_column, fallback_column, rules, empty_category, fallback_category):
-    if url_column not in df.columns:
-        sys.exit(f"Error: column '{url_column}' not found in CSV.")
+# --------------------------------------------------------------------------
+# Estatísticas do pipeline (--stats)
+# --------------------------------------------------------------------------
 
-    print(f"[classify_dataframe] Classifying {len(df)} records by column '{url_column}' "
-          f"(with fallback to '{fallback_column}' when empty)")
+def compute_funnel_stats(n_input, n_filtered, n_deduped):
+    """
+    Estatísticas de funil: quanto sobra em cada etapa (filtro e dedup).
+    """
+    retention_pct = round(n_filtered / n_input * 100, 2) if n_input else 0.0
+    dedup_removed_pct = round((n_filtered - n_deduped) / n_filtered * 100, 2) if n_filtered else 0.0
+    stats = {
+        "n_input": n_input,
+        "n_filtered": n_filtered,
+        "n_deduped": n_deduped,
+        "filter_retention_pct": retention_pct,
+        "dedup_removed_pct": dedup_removed_pct,
+    }
+    print("=== FUNIL DO PIPELINE ===")
+    print(f"Entrada (GloBI bruto): {n_input}")
+    print(f"Após filtro (foco/interagentes): {n_filtered} ({retention_pct}% do bruto)")
+    print(f"Após deduplicação: {n_deduped} ({dedup_removed_pct}% removido como duplicata)")
+    return stats
 
-    df = df.copy()
 
-    def resolve_value(row):
-        primary = row.get(url_column)
-        if pd.isna(primary) or str(primary).strip() == "" or str(primary).strip().lower() == "nan":
-            return row.get(fallback_column)
-        return primary
+def compute_dedup_collapse_stats(filtered_csv_path, memory_limit, threads, top_n):
+    """
+    Responde "quais espécies aparecem mais na deduplicação, e quantas vezes":
+    conta, no CSV filtrado (ANTES da dedup), quantos registros brutos existiam
+    para cada tríade única (source, interaction_type, target) -- ou seja,
+    quantos registros foram colapsados em 1 linha na deduplicação -- e também
+    a frequência bruta de cada espécie (somando aparições como fonte ou alvo).
+    """
+    con = duckdb.connect()
+    con.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    con.execute(f"PRAGMA threads={threads}")
 
-    df["_source_value"] = df.apply(resolve_value, axis=1)
-    df["category"] = df["_source_value"].apply(
-        lambda v: classify_value(v, rules, empty_category, fallback_category)
+    triad_counts = con.execute(f"""
+        SELECT source_taxon_name, interaction_type, target_taxon_name,
+               COUNT(*) AS n_registros_brutos
+        FROM read_csv('{esc(filtered_csv_path)}', AUTO_DETECT=TRUE)
+        GROUP BY source_taxon_name, interaction_type, target_taxon_name
+        ORDER BY n_registros_brutos DESC
+        LIMIT {top_n}
+    """).df()
+
+    species_counts = con.execute(f"""
+        WITH todas_especies AS (
+            SELECT source_taxon_name AS species
+            FROM read_csv('{esc(filtered_csv_path)}', AUTO_DETECT=TRUE)
+            UNION ALL
+            SELECT target_taxon_name AS species
+            FROM read_csv('{esc(filtered_csv_path)}', AUTO_DETECT=TRUE)
+        )
+        SELECT species, COUNT(*) AS n_aparicoes
+        FROM todas_especies
+        GROUP BY species
+        ORDER BY n_aparicoes DESC
+        LIMIT {top_n}
+    """).df()
+    con.close()
+
+    print(f"\n=== TOP {top_n} PARES QUE MAIS COLAPSARAM NA DEDUPLICAÇÃO ===")
+    print(triad_counts.to_string(index=False))
+    print(f"\n=== TOP {top_n} ESPÉCIES POR Nº DE APARIÇÕES BRUTAS (fonte + alvo, antes da dedup) ===")
+    print(species_counts.to_string(index=False))
+
+    return triad_counts, species_counts
+
+
+def compute_interaction_and_species_stats(deduped_csv_path, memory_limit, threads, top_n):
+    """
+    Distribuição de tipos de interação e top espécies (fonte/alvo) no
+    conjunto FINAL deduplicado.
+    """
+    con = duckdb.connect()
+    con.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    con.execute(f"PRAGMA threads={threads}")
+
+    interaction_dist = con.execute(f"""
+        SELECT interaction_type, COUNT(*) AS n
+        FROM read_csv('{esc(deduped_csv_path)}', AUTO_DETECT=TRUE)
+        GROUP BY interaction_type
+        ORDER BY n DESC
+    """).df()
+
+    top_source = con.execute(f"""
+        SELECT source_taxon_name AS species, COUNT(*) AS n
+        FROM read_csv('{esc(deduped_csv_path)}', AUTO_DETECT=TRUE)
+        GROUP BY source_taxon_name
+        ORDER BY n DESC
+        LIMIT {top_n}
+    """).df()
+
+    top_target = con.execute(f"""
+        SELECT target_taxon_name AS species, COUNT(*) AS n
+        FROM read_csv('{esc(deduped_csv_path)}', AUTO_DETECT=TRUE)
+        GROUP BY target_taxon_name
+        ORDER BY n DESC
+        LIMIT {top_n}
+    """).df()
+    con.close()
+
+    print(f"\n=== DISTRIBUIÇÃO DE TIPOS DE INTERAÇÃO (conjunto final, top {top_n}) ===")
+    print(interaction_dist.head(top_n).to_string(index=False))
+    print(f"\n=== TOP {top_n} ESPÉCIES FONTE (conjunto final) ===")
+    print(top_source.to_string(index=False))
+    print(f"\n=== TOP {top_n} ESPÉCIES ALVO (conjunto final) ===")
+    print(top_target.to_string(index=False))
+
+    return interaction_dist, top_source, top_target
+
+
+def save_bar_chart(labels, values, title, xlabel, ylabel, output_path, horizontal=False):
+    """
+    Salva um gráfico de barras simples em PNG. Importa matplotlib só aqui
+    (backend 'Agg', sem necessidade de display) para não exigir a dependência
+    quando --stats não é usado.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[save_bar_chart] matplotlib não instalado -- pulei a geração de gráficos. "
+              "Instale com: pip install matplotlib")
+        return None
+
+    labels = [str(v) for v in labels]
+    fig_height = max(4, 0.4 * len(labels)) if horizontal else 5
+    fig, ax = plt.subplots(figsize=(9, fig_height))
+
+    if horizontal:
+        ax.barh(labels[::-1], values[::-1])
+        ax.set_xlabel(ylabel)
+    else:
+        ax.bar(labels, values)
+        ax.set_ylabel(ylabel)
+        plt.xticks(rotation=45, ha="right")
+
+    ax.set_title(title)
+    fig.tight_layout()
+    ensure_parent_dir(output_path)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"[save_bar_chart] Gráfico salvo em {output_path}")
+    return output_path
+
+
+def run_stats(args, n_input, n_filtered, n_deduped, filtered_path, deduped_path,
+              traceability_counts):
+    """
+    Orquestra todas as estatísticas do pipeline: números no console e,
+    quando possível, gráficos PNG na pasta --stats-dir.
+    """
+    stats_dir = args.stats_dir or os.path.join(
+        os.path.dirname(os.path.abspath(args.output)) or ".", "stats"
     )
-    df = df.drop(columns=["_source_value"])
-    return df
+    top_n = args.stats_top_n
 
+    compute_funnel_stats(n_input, n_filtered, n_deduped)
 
-def build_summary(df):
-    tabela = df["category"].value_counts().reset_index()
-    tabela.columns = ["Source Type", "n"]
-    tabela["%"] = (tabela["n"] / len(df) * 100).round(1)
-    print(f"[build_summary] {len(tabela)} categories found")
-    return tabela
-
-
-def run_classification(deduped_csv_path, args):
-    df_origin = pd.read_csv(deduped_csv_path, usecols=lambda c: c in ORIGIN_COLUMNS)
-
-    rules = load_rules(args.rules_file)
-    df_classified = classify_dataframe(
-        df_origin, args.url_column, "study_source_archive_uri", rules,
-        args.empty_category, args.fallback_category
+    triad_counts, species_counts = compute_dedup_collapse_stats(
+        filtered_path, args.memory_limit, args.threads, top_n
     )
-    tabela = build_summary(df_classified)
 
-    print("=== SOURCE TYPE TABLE ===")
-    print(tabela.to_string(index=False))
+    interaction_dist, top_source, top_target = compute_interaction_and_species_stats(
+        deduped_path, args.memory_limit, args.threads, top_n
+    )
 
-    if args.classified_output:
-        df_classified.to_csv(args.classified_output, index=False)
+    # Gráficos
+    if traceability_counts:
+        save_bar_chart(
+            list(traceability_counts.keys()), list(traceability_counts.values()),
+            "Rastreabilidade da origem (study_citation)", "Categoria", "Nº de registros",
+            os.path.join(stats_dir, "02_rastreabilidade.png"), horizontal=True,
+        )
 
-    if args.summary_output:
-        tabela.to_csv(args.summary_output, index=False)
+    save_bar_chart(
+        interaction_dist["interaction_type"].head(top_n).tolist(),
+        interaction_dist["n"].head(top_n).tolist(),
+        f"Top {top_n} tipos de interação (conjunto final)", "Tipo de interação", "Nº de registros",
+        os.path.join(stats_dir, "03_tipos_interacao.png"), horizontal=True,
+    )
 
-    return df_classified
+    save_bar_chart(
+        top_source["species"].tolist(), top_source["n"].tolist(),
+        f"Top {top_n} espécies fonte (conjunto final)", "Espécie", "Nº de registros",
+        os.path.join(stats_dir, "04_top_especies_fonte.png"), horizontal=True,
+    )
+
+    save_bar_chart(
+        top_target["species"].tolist(), top_target["n"].tolist(),
+        f"Top {top_n} espécies alvo (conjunto final)", "Espécie", "Nº de registros",
+        os.path.join(stats_dir, "05_top_especies_alvo.png"), horizontal=True,
+    )
+
+    save_bar_chart(
+        species_counts["species"].tolist(), species_counts["n_aparicoes"].tolist(),
+        f"Top {top_n} espécies por aparições brutas (antes da dedup)", "Espécie", "Nº de aparições",
+        os.path.join(stats_dir, "06_especies_colapsadas_na_dedup.png"), horizontal=True,
+    )
 
 
 def main():
@@ -256,31 +474,31 @@ def main():
         filtered_path = os.path.join(tmp_dir, "filtered.csv")
         deduped_path = os.path.join(tmp_dir, "deduped.csv")
 
-        filter_with_duckdb(
+        n_input = count_csv_rows(args.input, args.memory_limit, args.threads) if args.stats else None
+
+        filtered_path, n_filtered = filter_with_duckdb(
             args.input, args.invalid_terms, args.focal_taxon, args.interacting_taxa,
             args.any_side, args.memory_limit, args.threads, filtered_path
         )
 
-        deduplicate_streaming(filtered_path, deduped_path, args.memory_limit, args.threads)
+        deduped_path, n_deduped = deduplicate_streaming(
+            filtered_path, deduped_path, args.memory_limit, args.threads
+        )
 
+        traceability_counts = None
         if args.output_origin:
-            # Copia só as colunas de origem, direto via DuckDB, sem pandas
-            con = duckdb.connect()
-            con.execute(f"PRAGMA memory_limit='{args.memory_limit}'")
-            cols_sql = ", ".join(ORIGIN_COLUMNS)
-            con.execute(f"""
-                COPY (
-                    SELECT {cols_sql} FROM read_csv('{esc(deduped_path)}', AUTO_DETECT=TRUE)
-                ) TO '{esc(args.output_origin)}' (FORMAT CSV, HEADER)
-            """)
-            con.close()
-            print(f"[output_origin] Full dataset saved in {args.output_origin}")
-
-        if args.classify_source:
-            run_classification(deduped_path, args)
+            traceability_counts = write_origin_with_traceability(
+                deduped_path, args.output_origin, args.memory_limit, args.threads
+            )
 
         extract_pairs_streaming(deduped_path, args.output, args.separator,
                                  args.memory_limit, args.threads)
+
+        if args.stats:
+            run_stats(
+                args, n_input, n_filtered, n_deduped, filtered_path, deduped_path,
+                traceability_counts
+            )
 
 
 if __name__ == "__main__":
