@@ -15,6 +15,7 @@ start_time = time.time()
 
 BUCKET = "pmc-oa-opendata"
 
+__version__ = "1.0.0"
 
 def get_args():
     parser = argparse.ArgumentParser(
