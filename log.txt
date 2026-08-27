@@ -1,2 +1,0 @@
-{"missing_pmid": 0, "missing_doi": 0, "normal_cases_pmid": 37, "normal_cases_doi": 37, "filtered_doi_prefix": 0, "not_found": 0}
-{"missing_pmid": 0, "missing_doi": 0, "normal_cases_pmid": 37, "normal_cases_doi": 37, "filtered_doi_prefix": 0, "not_found": 0}
