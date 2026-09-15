@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import argparse
 import json
@@ -8,14 +8,12 @@ import boto3
 from botocore import UNSIGNED
 from botocore.client import Config
 from botocore.exceptions import ClientError
-from crossref.restful import Works
 from lxml import etree
 
 start_time = time.time()
-
 BUCKET = "pmc-oa-opendata"
+__version__ = "2.0.0"
 
-__version__ = "1.0.0"
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -171,6 +169,12 @@ def main():
             db_conn.commit()
             data_buffer = []
 
+        exists = db_cursor.execute(
+            "SELECT 1 FROM pcw_literature WHERE pmcid = ?", (pmcid,)
+        ).fetchone()
+        if exists is not None:
+            continue
+
         version_prefix = find_latest_version(s3, pmcid)
         if version_prefix is None:
             report_stats["not_found"] += 1
@@ -193,12 +197,6 @@ def main():
         else:
             report_stats["missing_doi"] += 1
 
-        exists = db_cursor.execute(
-            "SELECT 1 FROM pcw_literature WHERE pmcid = ?", (pmcid,)
-        ).fetchone()
-        if exists is not None:
-            continue
-
         xml_raw = fetch_object(s3, f"{version_prefix}/{version_prefix}.xml")
         if xml_raw is None:
             continue
@@ -215,52 +213,34 @@ def main():
         title = meta.get("title", "")
         first_author = get_first_author(root)
         abs_text, article_text = extract_sections(root)
+        journal_name = meta.get("journal", "") or meta.get("citation", "")
 
         if doi_list_file:
-            if doi:
-                prefix, _, suffix = doi.partition("/")
-                for doi_journal in doi_list_to_keep.get(prefix, []):
-                    if suffix.startswith(doi_journal):
-                        try:
-                            works_res = Works().doi(doi)
-                            time.sleep(0.5)
-                            journal_name = (
-                                works_res["container-title"][0]
-                                if works_res and "container-title" in works_res
-                                else ""
-                            )
-                        except Exception:
-                            journal_name = ""
-                        report_stats["filtered_doi_prefix"] += 1
-                        data_buffer.append(
-                            (
-                                pmcid,
-                                pmid,
-                                title,
-                                year,
-                                doi,
-                                journal_name,
-                                first_author,
-                                abs_text,
-                                article_text,
-                            )
-                        )
-                        break
-        else:
-            journal_name = meta.get("citation", "")
-            data_buffer.append(
-                (
-                    pmcid,
-                    pmid,
-                    title,
-                    year,
-                    doi,
-                    journal_name,
-                    first_author,
-                    abs_text,
-                    article_text,
-                )
+            if not doi:
+                continue
+            prefix, _, suffix = doi.partition("/")
+            match_found = False
+            for doi_journal in doi_list_to_keep.get(prefix, []):
+                if suffix.startswith(doi_journal):
+                    match_found = True
+                    break
+            if not match_found:
+                continue
+            report_stats["filtered_doi_prefix"] += 1
+
+        data_buffer.append(
+            (
+                pmcid,
+                pmid,
+                title,
+                year,
+                doi,
+                journal_name,
+                first_author,
+                abs_text,
+                article_text,
             )
+        )
 
         if (
             report_stats["normal_cases_pmid"] % 1000 == 0
