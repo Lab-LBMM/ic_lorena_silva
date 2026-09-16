@@ -20,7 +20,7 @@ The project follows a three-phase methodology:
 
 ## Requirements
 
-* Python 3.x with the libraries listed in each `scripts/` subdirectory.
+* Python 3.12.3 with the libraries listed in each requirements.txt .
 
 ## Installation
 
