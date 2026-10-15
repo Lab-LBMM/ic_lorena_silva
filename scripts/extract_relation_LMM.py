@@ -5,52 +5,44 @@ import json
 import os
 import re
 import subprocess
-from typing import Literal
+from typing import Literal, Optional
 
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 # ==========================================
-# 1. CONFIGURAÇÕES GERAIS E AMBIENTE LOCAL
+# 1. CONFIGURAÇÕES DA BUSCA EM GRADE (GRID SEARCH)
 # ==========================================
-MODELO_ID = "gemma2"   # ex: "llama3.1", "qwen2.5", "gemma2"
+# Lista de todos os modelos locais do Ollama a testar
+MODELOS = ["deepseek-r1:1.5b"]
+
 NUM_SHOTS = 3
-TAMANHO_BLOCO = 3000           # caracteres; blocos curtos combinam com os shots
-SOBREPOSICAO_SENTENCAS = 1     # nº de sentenças repetidas entre blocos consecutivos
-MAX_TOKENS = 4000              # modelos de raciocínio (r1) precisam de bem mais (ex: 12000)
-MAX_TENTATIVAS = 3
+TAMANHO_BLOCO = 3000           
+SOBREPOSICAO_SENTENCAS = 1     
+MAX_TOKENS = 4000              
+MAX_TENTATIVAS = 3             
 
-_slug = MODELO_ID.replace(":", "_")
-FICHEIRO_SAIDA = f"grafos_extraidos_{_slug}.csv"          # só artigos 100% concluídos
-FICHEIRO_FALHAS = f"grafos_com_falhas_{_slug}.csv"        # artigos com bloco(s) falho(s)
-FICHEIRO_METRICAS = f"metricas_blocos_{_slug}.jsonl"      # 1 linha por bloco
-
+client = OpenAI(base_url="http://localhost:11434/v1", api_key="local")
 
 def garantir_modelo_local(nome_modelo):
-    print(f"[*] A verificar/descarregar o modelo '{nome_modelo}' no Ollama...")
+    """Verifica e baixa o modelo no Ollama se não existir."""
+    print(f"\n[*] Preparando ambiente para o modelo '{nome_modelo}'...")
     try:
         subprocess.run(["ollama", "pull", nome_modelo], check=True)
-        print(f"[*] Modelo '{nome_modelo}' pronto!\n")
+        print(f"[*] Modelo '{nome_modelo}' pronto e carregado na cache!\n")
     except FileNotFoundError:
-        print("[!] Ollama não encontrado. Instale com: curl -fsSL https://ollama.com/install.sh | sh")
+        print("[!] Ollama não encontrado.")
         exit(1)
     except subprocess.CalledProcessError as e:
         print(f"[!] Erro ao baixar o modelo: {e}")
         exit(1)
 
-# garantir_modelo_local(MODELO_ID)
-
-# ATENÇÃO: o contexto (num_ctx) do Ollama NÃO é definido aqui. Configure via Modelfile
-# (PARAMETER num_ctx 8192) ou variável de ambiente, senão o prompt pode ser truncado em silêncio.
-client = OpenAI(base_url="http://localhost:11434/v1", api_key="local")
-
 # ==========================================
-# 2. SCHEMA (structured output)
+# 2. FORMATO QUE A IA TEM QUE DEVOLVER (PYDANTIC)
 # ==========================================
 class Entity(BaseModel):
     text: str
     type: Literal["TAXON", "CULTIVATED_FUNGUS", "BEHAVIOR", "LOCATION"]
-
 
 class Relation(BaseModel):
     subject: str
@@ -59,78 +51,105 @@ class Relation(BaseModel):
     evidence: str
     negated: bool
 
-
 class Extraction(BaseModel):
+    scratchpad: Optional[str] = None # Permite que modelos de raciocínio pensem sem quebrar o código
     entities: list[Entity]
     relations: list[Relation]
 
-
-# Se o Ollama da sua versão rejeitar json_schema, troque por {"type": "json_object"}
-# (a validação Pydantic continua protegendo o pipeline).
 RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {"name": "extraction", "schema": Extraction.model_json_schema()},
 }
 
 # ==========================================
-# 3. PROMPT E SHOTS
+# 3. DICIONÁRIO DOS SYSTEM PROMPTS
 # ==========================================
-SYSTEM_PROMPT = """You are an expert in Natural Language Processing and Ecology, specialized in Information Extraction from scientific literature regarding symbiotic relationships involving ants (Formicidae) and associated microorganisms.
-Your task is to analyze the provided text and extract Named Entities (NER) and Ecological Relations (RE) structured as Subject-Relation-Object (SRO) triples.
-The input text is always delimited by <text></text> tags.
+PROMPTS = {
+    "P1_Ontologia_Rigida": """You are an Ontology-Guided Information Extraction System specialized in myrmecology and microbial symbiosis. Your task is to map text spans to a strict ontology.
 
-Entity Rules: Classify entities ONLY into the following categories: [TAXON, CULTIVATED_FUNGUS, BEHAVIOR, LOCATION]. The "text" field must contain the exact substring present in the original text.
+# ONTOLOGY DEFINITIONS & EXCLUSIONS
+1. TAXON: Biological entities (ants, bacteria, yeasts, plants). EXCLUDE: Names of researchers, locations, chemical compounds, or anatomy.
+2. CULTIVATED_FUNGUS: The specific fungal crop maintained by ants. EXCLUDE: Pathogenic or environmental fungi.
+3. BEHAVIOR: Specific actions of ants or microbes (e.g., weeding, grooming). EXCLUDE: General biological processes.
+4. LOCATION: Specific geographic areas or biomes.
 
-Relation Rules: Identify ecological connections between entities using ONLY the following predicates: [CULTIVATES, PARASITIZES, COMPETES_WITH, MUTUALISM_WITH]. The relation must have a logical direction (subject -> relation -> object). The "subject" and "object" fields must be exactly the "text" of an extracted entity.
-The "evidence" field must contain the exact text snippet that justifies the relation.
-The "negated" field must be boolean (true) ONLY if the text explicitly states that the interaction does NOT occur. Otherwise, it must be (false).
+# RELATION ONTOLOGY (SRO Triples)
+- [TAXON] -> CULTIVATES -> [CULTIVATED_FUNGUS]
+- [TAXON] -> PARASITIZES -> [TAXON or CULTIVATED_FUNGUS]
+- [TAXON/CULTIVATED_FUNGUS] -> MUTUALISM_WITH -> [TAXON/CULTIVATED_FUNGUS]
+- [TAXON] -> COMPETES_WITH -> [TAXON]
 
-Output Restriction: Return ONLY a valid JSON object conforming strictly to the requested schema. Do not include greetings, explanatory text, markdown code blocks, or any text outside the JSON brackets. If no entities or relations are found, return empty lists []."""
+# RULES
+Output ONLY a valid JSON object. Entities must be exact substrings.
+{
+  "entities": [{"text": "string", "type": "string"}],
+  "relations": [{"subject": "string", "relation": "string", "object": "string", "evidence": "string", "negated": boolean}]
+}
+""",
 
-# "user" guarda só o texto cru; o delimitador é aplicado por formatar_entrada().
-# TODO: revisar o shot 3 (MUTUALISM_WITH vs CULTIVATES) e adicionar shots com
-# negated=true, COMPETES_WITH, BEHAVIOR e resultado vazio.
+    "P2_Raciocinio_Etapas": """You are an expert bio-curator performing a Two-Stage Information Extraction on ecological texts about Formicidae. 
+
+# STEP 1: NAMED ENTITY RECOGNITION (NER)
+Identify entities belonging strictly to: [TAXON, CULTIVATED_FUNGUS, BEHAVIOR, LOCATION]. 
+
+# STEP 2: RELATION EXTRACTION (RE)
+Determine if any pairs are explicitly linked by: [CULTIVATES, PARASITIZES, COMPETES_WITH, MUTUALISM_WITH].
+
+# OUTPUT FORMAT
+Document your Step 1 and Step 2 thought process inside the "scratchpad" key before generating the JSON arrays. Output ONLY valid JSON.
+{
+  "scratchpad": "Step 1: Found X. Step 2: X parasitizes Y because...",
+  "entities": [{"text": "exact_span", "type": "TAXON"}],
+  "relations": [{"subject": "exact_span", "relation": "PARASITIZES", "object": "exact_span", "evidence": "quote", "negated": false}]
+}
+""",
+
+    "P3_Compreensao_Evidencia": """You are an advanced Machine Reading Comprehension (MRC) model extracting ecological relationships.
+
+# EXTRACTION QUERIES
+Q1: Which exact text spans represent entities? (Types: TAXON, CULTIVATED_FUNGUS, BEHAVIOR, LOCATION).
+Q2: Does the text explicitly describe a relationship? (Relations: CULTIVATES, PARASITIZES, COMPETES_WITH, MUTUALISM_WITH).
+
+# STRICT EVIDENCE RULE
+For every relation, you MUST populate the "evidence" field with the exact sequential words from the text that prove the relationship. If you cannot find an exact quote, DO NOT extract the relation. Set "negated" to true ONLY if explicitly denied.
+
+# RESPONSE
+Output only valid JSON. No markdown.
+{
+  "entities": [{"text": "span", "type": "TYPE"}],
+  "relations": [{"subject": "span", "relation": "TYPE", "object": "span", "evidence": "exact quote", "negated": false}]
+}
+"""
+}
+
 SHOTS = [
     {
         "user": "The common ant Camponotus rufipes is host to the specialized parasite Ophiocordyceps camponoti-rufipedis in the Atlantic rainforests of Brazil.",
-        "assistant": '{"entities": [{"text": "Camponotus rufipes", "type": "TAXON"}, {"text": "Ophiocordyceps camponoti-rufipedis", "type": "TAXON"}, {"text": "Brazil", "type": "LOCATION"}], "relations": [{"subject": "Ophiocordyceps camponoti-rufipedis", "relation": "PARASITIZES", "object": "Camponotus rufipes", "evidence": "host to the specialized parasite", "negated": false}]}',
-    },
-    {
-        "user": "Similarly, Ophiocordyceps kniphofioides infects Cephalotes atratus (Formicidae: Myrmicinae), Paraponera clavata , and Dinoponera longipes (Formicidae: Ponerinae) ants.",
-        "assistant": '{"entities": [{"text": "Ophiocordyceps kniphofioides", "type": "TAXON"}, {"text": "Cephalotes atratus", "type": "TAXON"}, {"text": "Paraponera clavata", "type": "TAXON"}, {"text": "Dinoponera longipes", "type": "TAXON"}], "relations": [{"subject": "Ophiocordyceps kniphofioides", "relation": "PARASITIZES", "object": "Cephalotes atratus", "evidence": "infects", "negated": false}, {"subject": "Ophiocordyceps kniphofioides", "relation": "PARASITIZES", "object": "Paraponera clavata", "evidence": "infects", "negated": false}, {"subject": "Ophiocordyceps kniphofioides", "relation": "PARASITIZES", "object": "Dinoponera longipes", "evidence": "infects", "negated": false}]}',
-    },
-    {
-        "user": "One fungal symbiont associated with A. pubescens was isolated and identified as L. gongylophorus.",
-        "assistant": '{"entities": [{"text": "A. pubescens", "type": "TAXON"}, {"text": "L. gongylophorus", "type": "CULTIVATED_FUNGUS"}], "relations": [{"subject": "A. pubescens", "relation": "MUTUALISM_WITH", "object": "L. gongylophorus", "evidence": "fungal symbiont associated with", "negated": false}]}',
-    },
+        "assistant": '{"scratchpad": "Found Camponotus rufipes (TAXON), Ophiocordyceps camponoti-rufipedis (TAXON), and Brazil (LOCATION). The text states Ophiocordyceps is a parasite to Camponotus.", "entities": [{"text": "Camponotus rufipes", "type": "TAXON"}, {"text": "Ophiocordyceps camponoti-rufipedis", "type": "TAXON"}, {"text": "Brazil", "type": "LOCATION"}], "relations": [{"subject": "Ophiocordyceps camponoti-rufipedis", "relation": "PARASITIZES", "object": "Camponotus rufipes", "evidence": "host to the specialized parasite", "negated": false}]}',
+    }
 ]
-
 
 def formatar_entrada(texto):
     return f"<text>{texto}</text>"
 
-
-def construir_mensagens(texto_alvo):
-    mensagens = [{"role": "system", "content": SYSTEM_PROMPT}]
+def construir_mensagens(texto_alvo, system_prompt):
+    mensagens = [{"role": "system", "content": system_prompt}]
     for shot in SHOTS[:NUM_SHOTS]:
         mensagens.append({"role": "user", "content": formatar_entrada(shot["user"])})
         mensagens.append({"role": "assistant", "content": shot["assistant"]})
     mensagens.append({"role": "user", "content": formatar_entrada(texto_alvo)})
     return mensagens
 
-# ==========================================
-# 4. DIVISÃO DO TEXTO (por sentenças, com sobreposição)
-# ==========================================
+# =======================
+# 4. QUEBRAR O TEXTO
+# =======================
 _SPLIT_SENTENCAS = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
 
-
-def dividir_texto_em_blocos(texto_completo, tamanho_maximo=TAMANHO_BLOCO,
-                            sobreposicao=SOBREPOSICAO_SENTENCAS):
+def dividir_texto_em_blocos(texto_completo, tamanho_maximo=TAMANHO_BLOCO, sobreposicao=SOBREPOSICAO_SENTENCAS):
     sentencas = []
     for paragrafo in re.split(r"\n\s*\n", texto_completo):
         for s in _SPLIT_SENTENCAS.split(paragrafo.strip()):
             s = s.strip()
-            # sentença gigante: corta duro para respeitar o limite
             while len(s) > tamanho_maximo:
                 sentencas.append(s[:tamanho_maximo])
                 s = s[tamanho_maximo:]
@@ -151,19 +170,16 @@ def dividir_texto_em_blocos(texto_completo, tamanho_maximo=TAMANHO_BLOCO,
     return blocos
 
 # ==========================================
-# 5. EXTRAÇÃO, VALIDAÇÃO E FUSÃO
+# 5. MANDA PRA IA, LIMPA O LIXO E JUNTA
 # ==========================================
 def limpar_resposta(conteudo):
-    """Remove <think>, cercas markdown e texto fora do primeiro {...} final."""
     conteudo = re.sub(r"<think>.*?</think>", "", conteudo, flags=re.DOTALL)
     conteudo = re.sub(r"```(?:json)?", "", conteudo)
     ini, fim = conteudo.find("{"), conteudo.rfind("}")
     return conteudo[ini:fim + 1] if ini != -1 and fim != -1 else conteudo.strip()
 
-
-def extrair_bloco(bloco, max_tentativas=MAX_TENTATIVAS):
-    """Retorna (dados_validados_pelo_schema | None, info_do_bloco)."""
-    mensagens = construir_mensagens(bloco)
+def extrair_bloco(bloco, modelo_id, system_prompt, max_tentativas=MAX_TENTATIVAS):
+    mensagens = construir_mensagens(bloco, system_prompt)
     info = {"tentativas": 0, "finish_reason": None, "erro": None, "tempo_s": 0.0}
     inicio = time.time()
     dados = None
@@ -172,9 +188,9 @@ def extrair_bloco(bloco, max_tentativas=MAX_TENTATIVAS):
         info["tentativas"] = tentativa + 1
         try:
             resp = client.chat.completions.create(
-                model=MODELO_ID,
+                model=modelo_id,
                 messages=mensagens,
-                temperature=0.0 if tentativa == 0 else 0.2,  # varia um pouco nas retentativas
+                temperature=0.0 if tentativa == 0 else 0.2,
                 max_tokens=MAX_TOKENS,
                 response_format=RESPONSE_FORMAT,
             )
@@ -195,9 +211,8 @@ def extrair_bloco(bloco, max_tentativas=MAX_TENTATIVAS):
 
         if escolha.finish_reason == "length":
             info["erro"] = "resposta truncada (finish_reason=length)"
-            info["resposta_bruta"] = bruta[:1500]   # para diagnosticar (think longo? loop?)
-            break  # repetir com o mesmo limite não resolve
-
+            info["resposta_bruta"] = bruta[:1500]
+            break
         conteudo = limpar_resposta(bruta)
         try:
             dados = Extraction.model_validate_json(conteudo).model_dump()
@@ -212,36 +227,25 @@ def extrair_bloco(bloco, max_tentativas=MAX_TENTATIVAS):
     info["tempo_s"] = round(time.time() - inicio, 2)
     return dados, info
 
-
 def _norm(s):
     return re.sub(r"\s+", " ", s).strip().lower()
 
-
 def validar_bloco(dados, bloco):
-    """
-    Mantém só itens ancorados no texto do bloco.
-    Retorna (dados_ok, contagem_de_descartes, lista_detalhada_de_descartados).
-    O 'motivo' distingue erro de cópia (formatação) de alucinação.
-    """
     bloco_norm = _norm(bloco)
     ents_ok, descartados = [], []
 
-    for e in dados["entities"]:
+    for e in dados.get("entities", []):
         if e["text"] and e["text"] in bloco:
             ents_ok.append(e)
         else:
-            motivo = ("so_difere_em_formatacao"
-                      if e["text"] and _norm(e["text"]) in bloco_norm
-                      else "ausente_no_texto")
+            motivo = "so_difere_em_formatacao" if e["text"] and _norm(e["text"]) in bloco_norm else "ausente_no_texto"
             descartados.append({"tipo": "entidade", "motivo": motivo, "item": e})
 
     textos = {e["text"] for e in ents_ok}
     rels_ok = []
-    for r in dados["relations"]:
+    for r in dados.get("relations", []):
         if not (r["evidence"] and r["evidence"] in bloco):
-            motivo = ("evidencia_so_difere_em_formatacao"
-                      if r["evidence"] and _norm(r["evidence"]) in bloco_norm
-                      else "evidencia_ausente_no_texto")
+            motivo = "evidencia_so_difere_em_formatacao" if r["evidence"] and _norm(r["evidence"]) in bloco_norm else "evidencia_ausente_no_texto"
         elif r["subject"] not in textos or r["object"] not in textos:
             motivo = "sujeito_ou_objeto_sem_entidade_valida"
         else:
@@ -250,114 +254,123 @@ def validar_bloco(dados, bloco):
         descartados.append({"tipo": "relacao", "motivo": motivo, "item": r})
 
     descartes = {
-        "entidades": len(dados["entities"]) - len(ents_ok),
-        "relacoes": len(dados["relations"]) - len(rels_ok),
+        "entidades": len(dados.get("entities", [])) - len(ents_ok),
+        "relacoes": len(dados.get("relations", [])) - len(rels_ok),
     }
     return {"entities": ents_ok, "relations": rels_ok}, descartes, descartados
 
-
 def fundir_resultados_validados(lista_de_dados):
-    """Une resultados já validados de vários blocos, removendo duplicatas."""
     entidades, relacoes = {}, {}
     for dados in lista_de_dados:
-        for e in dados["entities"]:
+        for e in dados.get("entities", []):
             entidades[(e["text"], e["type"])] = e
-        for r in dados["relations"]:
+        for r in dados.get("relations", []):
             chave = (r["subject"], r["relation"], r["object"], r["evidence"], r["negated"])
             relacoes[chave] = r
     return {"entities": list(entidades.values()), "relations": list(relacoes.values())}
 
 # ==========================================
-# 6. ORQUESTRAÇÃO COM CHECKPOINTING SEGURO
+# 6. FUNÇÃO PRINCIPAL DA BUSCA EM GRADE
 # ==========================================
 def _texto_seguro(valor):
     return "" if pd.isna(valor) else str(valor)
 
-
 def _anexar_csv(caminho, linha):
     pd.DataFrame([linha]).to_csv(caminho, mode="a", header=not os.path.exists(caminho), index=False)
 
-
-def _ler_processados():
-    if os.path.exists(FICHEIRO_SAIDA) and os.path.getsize(FICHEIRO_SAIDA) > 0:
-        return set(pd.read_csv(FICHEIRO_SAIDA)["pmcid"].astype(str))
-    return set()
-
-
-def processar_banco_sqlite(caminho_db, limite_artigos=None, tamanho_lote=50):
-    artigos_processados = _ler_processados()
-    if artigos_processados:
-        print(f"Retomando... {len(artigos_processados)} artigos já concluídos.")
-
+def executar_grid_search(caminho_db, limite_artigos=30):
+    print(f"[{time.strftime('%H:%M:%S')}] Iniciando GRID SEARCH no banco de dados...")
+    
+    # 1. Carregar os artigos do Gabarito para a memória
     conn = sqlite3.connect(caminho_db)
-    query = "SELECT pmcid, pmid, title, abstract, content FROM pcw_literature"
-    if limite_artigos:
-        query += f" LIMIT {int(limite_artigos)}"
-
-    print(f"Iniciando extração (Modelo: {MODELO_ID} | Shots: {NUM_SHOTS}).")
-    contador = 0
-    for df_chunk in pd.read_sql_query(query, conn, chunksize=tamanho_lote):
-        for _, row in df_chunk.iterrows():
-            contador += 1
-            pmcid = str(row["pmcid"])
-            if pmcid in artigos_processados:
-                continue
-
-            print(f"\n[{contador}] Processando PMCID: {pmcid}")
-            texto = f"{_texto_seguro(row['abstract'])}\n\n{_texto_seguro(row['content'])}".strip()
-            blocos = dividir_texto_em_blocos(texto)
-
-            validados, blocos_falhos = [], 0
-            descartes_total = {"entidades": 0, "relacoes": 0}
-
-            for i, bloco in enumerate(blocos):
-                print(f"  -> Bloco {i + 1}/{len(blocos)} ({len(bloco)} caracteres)...")
-                dados, info = extrair_bloco(bloco)
-
-                metrica = {"pmcid": pmcid, "bloco": i, "n_chars": len(bloco), **info}
-                if dados is None:
-                    blocos_falhos += 1
-                    print(f"    [!] Bloco falhou: {info['erro']}")
-                else:
-                    ok, descartes, detalhes = validar_bloco(dados, bloco)
-                    validados.append(ok)
-                    for k in descartes_total:
-                        descartes_total[k] += descartes[k]
-                    metrica.update({
-                        "n_entidades": len(ok["entities"]),
-                        "n_relacoes": len(ok["relations"]),
-                        "descartes_entidades": descartes["entidades"],
-                        "descartes_relacoes": descartes["relacoes"],
-                        "descartados": detalhes,
-                    })
-                with open(FICHEIRO_METRICAS, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(metrica, ensure_ascii=False) + "\n")
-
-            linha = {
-                "pmcid": pmcid,
-                "pmid": row["pmid"],
-                "titulo": row["title"],
-                "modelo": MODELO_ID,
-                "grafo_json": json.dumps(fundir_resultados_validados(validados), ensure_ascii=False),
-                "n_blocos": len(blocos),
-                "blocos_falhos": blocos_falhos,
-                "descartes_entidades": descartes_total["entidades"],
-                "descartes_relacoes": descartes_total["relacoes"],
-            }
-
-            if blocos_falhos == 0:
-                _anexar_csv(FICHEIRO_SAIDA, linha)
-                artigos_processados.add(pmcid)
-                print("  -> Grafo salvo com sucesso!")
-            else:
-                # não entra no checkpoint principal: será reprocessado na próxima execução
-                _anexar_csv(FICHEIRO_FALHAS, linha)
-                print(f"  -> {blocos_falhos}/{len(blocos)} blocos falharam; salvo em {FICHEIRO_FALHAS} "
-                      f"e NÃO marcado como concluído.")
-
+    query = f"SELECT pmcid, pmid, title, abstract, content FROM pcw_literature LIMIT {int(limite_artigos)}"
+    df_artigos = pd.read_sql_query(query, conn)
     conn.close()
-    print(f"\nFim. Concluídos em: {FICHEIRO_SAIDA} | Falhas em: {FICHEIRO_FALHAS} | Métricas: {FICHEIRO_METRICAS}")
+    
+    print(f"-> {len(df_artigos)} artigos carregados para teste cruzado.")
 
+    # 2. Percorrer os modelos
+    for modelo in MODELOS:
+        garantir_modelo_local(modelo)
+        _slug = modelo.replace(":", "_")
+        
+        # 3. Percorrer os prompts
+        for nome_prompt, texto_prompt in PROMPTS.items():
+            print(f"\n" + "="*50)
+            print(f"EXECUTANDO COMBINAÇÃO: Modelo [{modelo}] | Prompt [{nome_prompt}]")
+            print("="*50)
+            
+            ficheiro_saida = f"grafos_extraidos_{_slug}_{nome_prompt}.csv"
+            ficheiro_falhas = f"grafos_com_falhas_{_slug}_{nome_prompt}.csv"
+            ficheiro_metricas = f"metricas_blocos_{_slug}_{nome_prompt}.jsonl"
+
+            # Ler processados apenas para esta combinação específica
+            artigos_processados = set()
+            if os.path.exists(ficheiro_saida) and os.path.getsize(ficheiro_saida) > 0:
+                artigos_processados = set(pd.read_csv(ficheiro_saida)["pmcid"].astype(str))
+
+            contador = 0
+            for _, row in df_artigos.iterrows():
+                contador += 1
+                pmcid = str(row["pmcid"])
+                if pmcid in artigos_processados:
+                    continue
+
+                print(f"\n[{contador}/{len(df_artigos)}] Processando PMCID: {pmcid}")
+                texto = f"{_texto_seguro(row['abstract'])}\n\n{_texto_seguro(row['content'])}".strip()
+                blocos = dividir_texto_em_blocos(texto)
+
+                validados, blocos_falhos = [], 0
+                descartes_total = {"entidades": 0, "relacoes": 0}
+
+                for i, bloco in enumerate(blocos):
+                    print(f"  -> Bloco {i + 1}/{len(blocos)} ({len(bloco)} chars)...", end="", flush=True)
+                    dados, info = extrair_bloco(bloco, modelo, texto_prompt)
+
+                    metrica = {"pmcid": pmcid, "bloco": i, "n_chars": len(bloco), **info}
+                    if dados is None:
+                        blocos_falhos += 1
+                        print(f" [FALHOU: {info['erro']}]")
+                    else:
+                        ok, descartes, detalhes = validar_bloco(dados, bloco)
+                        validados.append(ok)
+                        for k in descartes_total:
+                            descartes_total[k] += descartes[k]
+                        metrica.update({
+                            "n_entidades": len(ok["entities"]),
+                            "n_relacoes": len(ok["relations"]),
+                            "descartes_entidades": descartes["entidades"],
+                            "descartes_relacoes": descartes["relacoes"],
+                            "descartados": detalhes,
+                        })
+                        print(f" [OK: {info['tempo_s']}s]")
+                        
+                    with open(ficheiro_metricas, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(metrica, ensure_ascii=False) + "\n")
+
+                linha = {
+                    "pmcid": pmcid,
+                    "pmid": row["pmid"],
+                    "titulo": row["title"],
+                    "modelo": modelo,
+                    "prompt": nome_prompt,
+                    "grafo_json": json.dumps(fundir_resultados_validados(validados), ensure_ascii=False),
+                    "n_blocos": len(blocos),
+                    "blocos_falhos": blocos_falhos,
+                    "descartes_entidades": descartes_total["entidades"],
+                    "descartes_relacoes": descartes_total["relacoes"],
+                }
+
+                if blocos_falhos == 0:
+                    _anexar_csv(ficheiro_saida, linha)
+                    artigos_processados.add(pmcid)
+                    print(f"  -> Grafo salvo! ({len(validados)} blocos fundidos)")
+                else:
+                    _anexar_csv(ficheiro_falhas, linha)
+                    print(f"  -> {blocos_falhos}/{len(blocos)} blocos falharam; salvo em falhas.")
 
 if __name__ == "__main__":
-    processar_banco_sqlite(caminho_db="data/data_base/literature.db", limite_artigos=5)
+    # Testaremos 5 artigos de acordo com a nossa estratégia metodológica
+    executar_grid_search(caminho_db="data/data_base/literature.db", limite_artigos=5)
+
+#tempo --> tá demorando 45min aprox. por modelo pra rodar 15 requisições

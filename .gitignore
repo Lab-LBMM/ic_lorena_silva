@@ -3,4 +3,7 @@ data/raw/*
 __pycache__/
 *.pyc
 .venv/
+*.csv
+*.jsonl
+*.txt
 
