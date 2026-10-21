@@ -6,4 +6,5 @@ __pycache__/
 *.csv
 *.jsonl
 *.txt
-
+artigos_para_leitura.md
+*.png
