@@ -11,34 +11,34 @@ from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 # ==========================================
-# 1. CONFIGURAÇÕES DA BUSCA EM GRADE (GRID SEARCH)
+# 1. GRID SEARCH CONFIGURATIONS
 # ==========================================
-# Lista de todos os modelos locais do Ollama a testar
-MODELOS = ["deepseek-r1:1.5b"]
+# List of all local Ollama models to test
+MODELS = ["deepseek-r1:1.5b"]
 
 NUM_SHOTS = 3
-TAMANHO_BLOCO = 3000           
-SOBREPOSICAO_SENTENCAS = 1     
+BLOCK_SIZE = 3000           
+SENTENCE_OVERLAP = 1     
 MAX_TOKENS = 4000              
-MAX_TENTATIVAS = 3             
+MAX_ATTEMPTS = 3             
 
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="local")
 
-def garantir_modelo_local(nome_modelo):
-    """Verifica e baixa o modelo no Ollama se não existir."""
-    print(f"\n[*] Preparando ambiente para o modelo '{nome_modelo}'...")
+def ensure_local_model(model_name):
+    """Checks and downloads the model in Ollama if it doesn't exist."""
+    print(f"\n[*] Preparing environment for model '{model_name}'...")
     try:
-        subprocess.run(["ollama", "pull", nome_modelo], check=True)
-        print(f"[*] Modelo '{nome_modelo}' pronto e carregado na cache!\n")
+        subprocess.run(["ollama", "pull", model_name], check=True)
+        print(f"[*] Model '{model_name}' is ready and cached!\n")
     except FileNotFoundError:
-        print("[!] Ollama não encontrado.")
+        print("[!] Ollama not found.")
         exit(1)
     except subprocess.CalledProcessError as e:
-        print(f"[!] Erro ao baixar o modelo: {e}")
+        print(f"[!] Error downloading the model: {e}")
         exit(1)
 
 # ==========================================
-# 2. FORMATO QUE A IA TEM QUE DEVOLVER (PYDANTIC)
+# 2. AI RESPONSE FORMAT (PYDANTIC)
 # ==========================================
 class Entity(BaseModel):
     text: str
@@ -52,7 +52,7 @@ class Relation(BaseModel):
     negated: bool
 
 class Extraction(BaseModel):
-    scratchpad: Optional[str] = None # Permite que modelos de raciocínio pensem sem quebrar o código
+    scratchpad: Optional[str] = None # Allows reasoning models to think without breaking the code
     entities: list[Entity]
     relations: list[Relation]
 
@@ -62,10 +62,10 @@ RESPONSE_FORMAT = {
 }
 
 # ==========================================
-# 3. DICIONÁRIO DOS SYSTEM PROMPTS
+# 3. SYSTEM PROMPTS DICTIONARY
 # ==========================================
 PROMPTS = {
-    "P1_Ontologia_Rigida": """You are an Ontology-Guided Information Extraction System specialized in myrmecology and microbial symbiosis. Your task is to map text spans to a strict ontology.
+    "P1_Strict_Ontology": """You are an Ontology-Guided Information Extraction System specialized in myrmecology and microbial symbiosis. Your task is to map text spans to a strict ontology.
 
 # ONTOLOGY DEFINITIONS & EXCLUSIONS
 1. TAXON: Biological entities (ants, bacteria, yeasts, plants). EXCLUDE: Names of researchers, locations, chemical compounds, or anatomy.
@@ -87,7 +87,7 @@ Output ONLY a valid JSON object. Entities must be exact substrings.
 }
 """,
 
-    "P2_Raciocinio_Etapas": """You are an expert bio-curator performing a Two-Stage Information Extraction on ecological texts about Formicidae. 
+    "P2_Step_Reasoning": """You are an expert bio-curator performing a Two-Stage Information Extraction on ecological texts about Formicidae. 
 
 # STEP 1: NAMED ENTITY RECOGNITION (NER)
 Identify entities belonging strictly to: [TAXON, CULTIVATED_FUNGUS, BEHAVIOR, LOCATION]. 
@@ -104,7 +104,7 @@ Document your Step 1 and Step 2 thought process inside the "scratchpad" key befo
 }
 """,
 
-    "P3_Compreensao_Evidencia": """You are an advanced Machine Reading Comprehension (MRC) model extracting ecological relationships.
+    "P3_Evidence_Comprehension": """You are an advanced Machine Reading Comprehension (MRC) model extracting ecological relationships.
 
 # EXTRACTION QUERIES
 Q1: Which exact text spans represent entities? (Types: TAXON, CULTIVATED_FUNGUS, BEHAVIOR, LOCATION).
@@ -129,248 +129,247 @@ SHOTS = [
     }
 ]
 
-def formatar_entrada(texto):
-    return f"<text>{texto}</text>"
+def format_input(text):
+    return f"<text>{text}</text>"
 
-def construir_mensagens(texto_alvo, system_prompt):
-    mensagens = [{"role": "system", "content": system_prompt}]
+def build_messages(target_text, system_prompt):
+    messages = [{"role": "system", "content": system_prompt}]
     for shot in SHOTS[:NUM_SHOTS]:
-        mensagens.append({"role": "user", "content": formatar_entrada(shot["user"])})
-        mensagens.append({"role": "assistant", "content": shot["assistant"]})
-    mensagens.append({"role": "user", "content": formatar_entrada(texto_alvo)})
-    return mensagens
+        messages.append({"role": "user", "content": format_input(shot["user"])})
+        messages.append({"role": "assistant", "content": shot["assistant"]})
+    messages.append({"role": "user", "content": format_input(target_text)})
+    return messages
 
 # =======================
-# 4. QUEBRAR O TEXTO
+# 4. SPLIT TEXT
 # =======================
-_SPLIT_SENTENCAS = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
+_SPLIT_SENTENCES = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
 
-def dividir_texto_em_blocos(texto_completo, tamanho_maximo=TAMANHO_BLOCO, sobreposicao=SOBREPOSICAO_SENTENCAS):
-    sentencas = []
-    for paragrafo in re.split(r"\n\s*\n", texto_completo):
-        for s in _SPLIT_SENTENCAS.split(paragrafo.strip()):
+def split_text_into_blocks(full_text, max_size=BLOCK_SIZE, overlap=SENTENCE_OVERLAP):
+    sentences = []
+    for paragraph in re.split(r"\n\s*\n", full_text):
+        for s in _SPLIT_SENTENCES.split(paragraph.strip()):
             s = s.strip()
-            while len(s) > tamanho_maximo:
-                sentencas.append(s[:tamanho_maximo])
-                s = s[tamanho_maximo:]
+            while len(s) > max_size:
+                sentences.append(s[:max_size])
+                s = s[max_size:]
             if s:
-                sentencas.append(s)
+                sentences.append(s)
 
-    blocos, atual = [], []
-    tamanho_atual = 0
-    for s in sentencas:
-        if atual and tamanho_atual + len(s) + 1 > tamanho_maximo:
-            blocos.append(" ".join(atual))
-            atual = atual[-sobreposicao:] if sobreposicao else []
-            tamanho_atual = sum(len(x) + 1 for x in atual)
-        atual.append(s)
-        tamanho_atual += len(s) + 1
-    if atual:
-        blocos.append(" ".join(atual))
-    return blocos
+    blocks, current = [], []
+    current_size = 0
+    for s in sentences:
+        if current and current_size + len(s) + 1 > max_size:
+            blocks.append(" ".join(current))
+            current = current[-overlap:] if overlap else []
+            current_size = sum(len(x) + 1 for x in current)
+        current.append(s)
+        current_size += len(s) + 1
+    if current:
+        blocks.append(" ".join(current))
+    return blocks
 
 # ==========================================
-# 5. MANDA PRA IA, LIMPA O LIXO E JUNTA
+# 5. SEND TO AI, CLEAN OUTPUT, AND MERGE
 # ==========================================
-def limpar_resposta(conteudo):
-    conteudo = re.sub(r"<think>.*?</think>", "", conteudo, flags=re.DOTALL)
-    conteudo = re.sub(r"```(?:json)?", "", conteudo)
-    ini, fim = conteudo.find("{"), conteudo.rfind("}")
-    return conteudo[ini:fim + 1] if ini != -1 and fim != -1 else conteudo.strip()
+def clean_response(content):
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+    content = re.sub(r"```(?:json)?", "", content)
+    start, end = content.find("{"), content.rfind("}")
+    return content[start:end + 1] if start != -1 and end != -1 else content.strip()
 
-def extrair_bloco(bloco, modelo_id, system_prompt, max_tentativas=MAX_TENTATIVAS):
-    mensagens = construir_mensagens(bloco, system_prompt)
-    info = {"tentativas": 0, "finish_reason": None, "erro": None, "tempo_s": 0.0}
-    inicio = time.time()
-    dados = None
+def extract_block(block, model_id, system_prompt, max_attempts=MAX_ATTEMPTS):
+    messages = build_messages(block, system_prompt)
+    info = {"attempts": 0, "finish_reason": None, "error": None, "time_s": 0.0}
+    start_time = time.time()
+    data = None
 
-    for tentativa in range(max_tentativas):
-        info["tentativas"] = tentativa + 1
+    for attempt in range(max_attempts):
+        info["attempts"] = attempt + 1
         try:
             resp = client.chat.completions.create(
-                model=modelo_id,
-                messages=mensagens,
-                temperature=0.0 if tentativa == 0 else 0.2,
+                model=model_id,
+                messages=messages,
+                temperature=0.0 if attempt == 0 else 0.2,
                 max_tokens=MAX_TOKENS,
                 response_format=RESPONSE_FORMAT,
             )
         except Exception as e:
             msg = str(e).lower()
             if "timeout" in msg or "connection" in msg:
-                espera = 5 * (tentativa + 1)
-                info["erro"] = f"servidor lento/indisponível: {e}"
-                print(f"    [!] Servidor demorou. Pausando {espera}s (tentativa {tentativa + 1}/{max_tentativas})...")
-                time.sleep(espera)
+                wait_time = 5 * (attempt + 1)
+                info["error"] = f"server slow/unavailable: {e}"
+                print(f"    [!] Server delayed. Pausing {wait_time}s (attempt {attempt + 1}/{max_attempts})...")
+                time.sleep(wait_time)
                 continue
-            info["erro"] = f"erro fatal: {e}"
+            info["error"] = f"fatal error: {e}"
             break
 
-        escolha = resp.choices[0]
-        bruta = escolha.message.content or ""
-        info["finish_reason"] = escolha.finish_reason
+        choice = resp.choices[0]
+        raw = choice.message.content or ""
+        info["finish_reason"] = choice.finish_reason
 
-        if escolha.finish_reason == "length":
-            info["erro"] = "resposta truncada (finish_reason=length)"
-            info["resposta_bruta"] = bruta[:1500]
+        if choice.finish_reason == "length":
+            info["error"] = "truncated response (finish_reason=length)"
+            info["raw_response"] = raw[:1500]
             break
-        conteudo = limpar_resposta(bruta)
+        
+        content = clean_response(raw)
         try:
-            dados = Extraction.model_validate_json(conteudo).model_dump()
-            info["erro"] = None
-            info.pop("resposta_bruta", None)
+            data = Extraction.model_validate_json(content).model_dump()
+            info["error"] = None
+            info.pop("raw_response", None)
             break
         except ValidationError as e:
-            info["erro"] = f"JSON/schema inválido: {str(e)[:200]}"
-            info["resposta_bruta"] = bruta[:1500]
+            info["error"] = f"Invalid JSON/schema: {str(e)[:200]}"
+            info["raw_response"] = raw[:1500]
             continue
 
-    info["tempo_s"] = round(time.time() - inicio, 2)
-    return dados, info
+    info["time_s"] = round(time.time() - start_time, 2)
+    return data, info
 
 def _norm(s):
     return re.sub(r"\s+", " ", s).strip().lower()
 
-def validar_bloco(dados, bloco):
-    bloco_norm = _norm(bloco)
-    ents_ok, descartados = [], []
+def validate_block(data, block):
+    block_norm = _norm(block)
+    ents_ok, discarded = [], []
 
-    for e in dados.get("entities", []):
-        if e["text"] and e["text"] in bloco:
+    for e in data.get("entities", []):
+        if e["text"] and e["text"] in block:
             ents_ok.append(e)
         else:
-            motivo = "so_difere_em_formatacao" if e["text"] and _norm(e["text"]) in bloco_norm else "ausente_no_texto"
-            descartados.append({"tipo": "entidade", "motivo": motivo, "item": e})
+            reason = "differs_only_in_formatting" if e["text"] and _norm(e["text"]) in block_norm else "missing_in_text"
+            discarded.append({"type": "entity", "reason": reason, "item": e})
 
-    textos = {e["text"] for e in ents_ok}
+    texts = {e["text"] for e in ents_ok}
     rels_ok = []
-    for r in dados.get("relations", []):
-        if not (r["evidence"] and r["evidence"] in bloco):
-            motivo = "evidencia_so_difere_em_formatacao" if r["evidence"] and _norm(r["evidence"]) in bloco_norm else "evidencia_ausente_no_texto"
-        elif r["subject"] not in textos or r["object"] not in textos:
-            motivo = "sujeito_ou_objeto_sem_entidade_valida"
+    for r in data.get("relations", []):
+        if not (r["evidence"] and r["evidence"] in block):
+            reason = "evidence_differs_only_in_formatting" if r["evidence"] and _norm(r["evidence"]) in block_norm else "evidence_missing_in_text"
+        elif r["subject"] not in texts or r["object"] not in texts:
+            reason = "subject_or_object_without_valid_entity"
         else:
             rels_ok.append(r)
             continue
-        descartados.append({"tipo": "relacao", "motivo": motivo, "item": r})
+        discarded.append({"type": "relation", "reason": reason, "item": r})
 
-    descartes = {
-        "entidades": len(dados.get("entities", [])) - len(ents_ok),
-        "relacoes": len(dados.get("relations", [])) - len(rels_ok),
+    discards = {
+        "entities": len(data.get("entities", [])) - len(ents_ok),
+        "relations": len(data.get("relations", [])) - len(rels_ok),
     }
-    return {"entities": ents_ok, "relations": rels_ok}, descartes, descartados
+    return {"entities": ents_ok, "relations": rels_ok}, discards, discarded
 
-def fundir_resultados_validados(lista_de_dados):
-    entidades, relacoes = {}, {}
-    for dados in lista_de_dados:
-        for e in dados.get("entities", []):
-            entidades[(e["text"], e["type"])] = e
-        for r in dados.get("relations", []):
-            chave = (r["subject"], r["relation"], r["object"], r["evidence"], r["negated"])
-            relacoes[chave] = r
-    return {"entities": list(entidades.values()), "relations": list(relacoes.values())}
+def merge_validated_results(data_list):
+    entities, relations = {}, {}
+    for data in data_list:
+        for e in data.get("entities", []):
+            entities[(e["text"], e["type"])] = e
+        for r in data.get("relations", []):
+            key = (r["subject"], r["relation"], r["object"], r["evidence"], r["negated"])
+            relations[key] = r
+    return {"entities": list(entities.values()), "relations": list(relations.values())}
 
 # ==========================================
-# 6. FUNÇÃO PRINCIPAL DA BUSCA EM GRADE
+# 6. MAIN GRID SEARCH FUNCTION
 # ==========================================
-def _texto_seguro(valor):
-    return "" if pd.isna(valor) else str(valor)
+def _safe_text(value):
+    return "" if pd.isna(value) else str(value)
 
-def _anexar_csv(caminho, linha):
-    pd.DataFrame([linha]).to_csv(caminho, mode="a", header=not os.path.exists(caminho), index=False)
+def _append_csv(path, row):
+    pd.DataFrame([row]).to_csv(path, mode="a", header=not os.path.exists(path), index=False)
 
-def executar_grid_search(caminho_db, limite_artigos=30):
-    print(f"[{time.strftime('%H:%M:%S')}] Iniciando GRID SEARCH no banco de dados...")
+def run_grid_search(db_path, article_limit=30):
+    print(f"[{time.strftime('%H:%M:%S')}] Starting GRID SEARCH in the database...")
     
-    # 1. Carregar os artigos do Gabarito para a memória
-    conn = sqlite3.connect(caminho_db)
-    query = f"SELECT pmcid, pmid, title, abstract, content FROM pcw_literature LIMIT {int(limite_artigos)}"
-    df_artigos = pd.read_sql_query(query, conn)
+    # 1. Load Gold Standard articles into memory
+    conn = sqlite3.connect(db_path)
+    query = f"SELECT pmcid, pmid, title, abstract, content FROM pcw_literature LIMIT {int(article_limit)}"
+    df_articles = pd.read_sql_query(query, conn)
     conn.close()
     
-    print(f"-> {len(df_artigos)} artigos carregados para teste cruzado.")
+    print(f"-> {len(df_articles)} articles loaded for cross-testing.")
 
-    # 2. Percorrer os modelos
-    for modelo in MODELOS:
-        garantir_modelo_local(modelo)
-        _slug = modelo.replace(":", "_")
+    # 2. Iterate through models
+    for model in MODELS:
+        ensure_local_model(model)
+        _slug = model.replace(":", "_")
         
-        # 3. Percorrer os prompts
-        for nome_prompt, texto_prompt in PROMPTS.items():
+        # 3. Iterate through prompts
+        for prompt_name, prompt_text in PROMPTS.items():
             print(f"\n" + "="*50)
-            print(f"EXECUTANDO COMBINAÇÃO: Modelo [{modelo}] | Prompt [{nome_prompt}]")
+            print(f"RUNNING COMBINATION: Model [{model}] | Prompt [{prompt_name}]")
             print("="*50)
             
-            ficheiro_saida = f"grafos_extraidos_{_slug}_{nome_prompt}.csv"
-            ficheiro_falhas = f"grafos_com_falhas_{_slug}_{nome_prompt}.csv"
-            ficheiro_metricas = f"metricas_blocos_{_slug}_{nome_prompt}.jsonl"
+            output_file = f"extracted_graphs_{_slug}_{prompt_name}.csv"
+            failed_file = f"failed_graphs_{_slug}_{prompt_name}.csv"
+            metrics_file = f"block_metrics_{_slug}_{prompt_name}.jsonl"
 
-            # Ler processados apenas para esta combinação específica
-            artigos_processados = set()
-            if os.path.exists(ficheiro_saida) and os.path.getsize(ficheiro_saida) > 0:
-                artigos_processados = set(pd.read_csv(ficheiro_saida)["pmcid"].astype(str))
+            # Read processed only for this specific combination
+            processed_articles = set()
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                processed_articles = set(pd.read_csv(output_file)["pmcid"].astype(str))
 
-            contador = 0
-            for _, row in df_artigos.iterrows():
-                contador += 1
+            counter = 0
+            for _, row in df_articles.iterrows():
+                counter += 1
                 pmcid = str(row["pmcid"])
-                if pmcid in artigos_processados:
+                if pmcid in processed_articles:
                     continue
 
-                print(f"\n[{contador}/{len(df_artigos)}] Processando PMCID: {pmcid}")
-                texto = f"{_texto_seguro(row['abstract'])}\n\n{_texto_seguro(row['content'])}".strip()
-                blocos = dividir_texto_em_blocos(texto)
+                print(f"\n[{counter}/{len(df_articles)}] Processing PMCID: {pmcid}")
+                text = f"{_safe_text(row['abstract'])}\n\n{_safe_text(row['content'])}".strip()
+                blocks = split_text_into_blocks(text)
 
-                validados, blocos_falhos = [], 0
-                descartes_total = {"entidades": 0, "relacoes": 0}
+                validated, failed_blocks = [], 0
+                total_discards = {"entities": 0, "relations": 0}
 
-                for i, bloco in enumerate(blocos):
-                    print(f"  -> Bloco {i + 1}/{len(blocos)} ({len(bloco)} chars)...", end="", flush=True)
-                    dados, info = extrair_bloco(bloco, modelo, texto_prompt)
+                for i, block in enumerate(blocks):
+                    print(f"  -> Block {i + 1}/{len(blocks)} ({len(block)} chars)...", end="", flush=True)
+                    data, info = extract_block(block, model, prompt_text)
 
-                    metrica = {"pmcid": pmcid, "bloco": i, "n_chars": len(bloco), **info}
-                    if dados is None:
-                        blocos_falhos += 1
-                        print(f" [FALHOU: {info['erro']}]")
+                    metric = {"pmcid": pmcid, "block": i, "n_chars": len(block), **info}
+                    if data is None:
+                        failed_blocks += 1
+                        print(f" [FAILED: {info['error']}]")
                     else:
-                        ok, descartes, detalhes = validar_bloco(dados, bloco)
-                        validados.append(ok)
-                        for k in descartes_total:
-                            descartes_total[k] += descartes[k]
-                        metrica.update({
-                            "n_entidades": len(ok["entities"]),
-                            "n_relacoes": len(ok["relations"]),
-                            "descartes_entidades": descartes["entidades"],
-                            "descartes_relacoes": descartes["relacoes"],
-                            "descartados": detalhes,
+                        ok, discards, details = validate_block(data, block)
+                        validated.append(ok)
+                        for k in total_discards:
+                            total_discards[k] += discards[k]
+                        metric.update({
+                            "n_entities": len(ok["entities"]),
+                            "n_relations": len(ok["relations"]),
+                            "discarded_entities": discards["entities"],
+                            "discarded_relations": discards["relations"],
+                            "discarded_details": details,
                         })
-                        print(f" [OK: {info['tempo_s']}s]")
+                        print(f" [OK: {info['time_s']}s]")
                         
-                    with open(ficheiro_metricas, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(metrica, ensure_ascii=False) + "\n")
+                    with open(metrics_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(metric, ensure_ascii=False) + "\n")
 
-                linha = {
+                row_data = {
                     "pmcid": pmcid,
                     "pmid": row["pmid"],
-                    "titulo": row["title"],
-                    "modelo": modelo,
-                    "prompt": nome_prompt,
-                    "grafo_json": json.dumps(fundir_resultados_validados(validados), ensure_ascii=False),
-                    "n_blocos": len(blocos),
-                    "blocos_falhos": blocos_falhos,
-                    "descartes_entidades": descartes_total["entidades"],
-                    "descartes_relacoes": descartes_total["relacoes"],
+                    "title": row["title"],
+                    "model": model,
+                    "prompt": prompt_name,
+                    "graph_json": json.dumps(merge_validated_results(validated), ensure_ascii=False),
+                    "n_blocks": len(blocks),
+                    "failed_blocks": failed_blocks,
+                    "discarded_entities": total_discards["entities"],
+                    "discarded_relations": total_discards["relations"],
                 }
 
-                if blocos_falhos == 0:
-                    _anexar_csv(ficheiro_saida, linha)
-                    artigos_processados.add(pmcid)
-                    print(f"  -> Grafo salvo! ({len(validados)} blocos fundidos)")
+                if failed_blocks == 0:
+                    _append_csv(output_file, row_data)
+                    processed_articles.add(pmcid)
+                    print(f"  -> Graph saved! ({len(validated)} merged blocks)")
                 else:
-                    _anexar_csv(ficheiro_falhas, linha)
-                    print(f"  -> {blocos_falhos}/{len(blocos)} blocos falharam; salvo em falhas.")
+                    _append_csv(failed_file, row_data)
+                    print(f"  -> {failed_blocks}/{len(blocks)} blocks failed; saved to failed files.")
 
 if __name__ == "__main__":
-    # Testaremos 5 artigos de acordo com a nossa estratégia metodológica
-    executar_grid_search(caminho_db="data/data_base/literature.db", limite_artigos=5)
-
-#tempo --> tá demorando 45min aprox. por modelo pra rodar 15 requisições
+    # Testing 5 articles according to our methodological strategy
+    run_grid_search(db_path="data/data_base/literature.db", article_limit=5)

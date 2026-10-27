@@ -8,138 +8,135 @@ import pandas as pd
 import seaborn as sns
 
 
-def normalizar_texto(texto):
-    """Remove espaços extras, quebras de linha e converte para minúsculas de forma segura."""
-    if texto is None:
+def normalize_text(text):
+    if text is None:
         return ""
-    return " ".join(str(texto).strip().lower().split())
+    return " ".join(str(text).strip().lower().split())
 
 
-def extrair_conjuntos(caminho_csv):
-    """Lê o CSV usando csv.DictReader com suporte a JSONs multilinha."""
-    entidades = set()
-    relacoes = set()
+def extract_sets(csv_path):
+    entities = set()
+    relations = set()
 
-    if not os.path.exists(caminho_csv):
-        print(f"[Erro] Ficheiro não encontrado: {caminho_csv}")
+    if not os.path.exists(csv_path):
+        print(f"[Error] File not found: {csv_path}")
         return set(), set()
 
     try:
-        with open(caminho_csv, mode="r", encoding="utf-8") as f:
+        with open(csv_path, mode="r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                grafo_raw = (row.get("grafo_json") or "").strip()
-                if not grafo_raw:
+                graph_raw = (row.get("grafo_json") or "").strip()
+                if not graph_raw:
                     continue
 
                 try:
-                    grafo = json.loads(grafo_raw, strict=False)
+                    graph = json.loads(graph_raw, strict=False)
 
-                    # 1. Extrair Entidades: (texto, tipo)
-                    for e in grafo.get("entities") or []:
+                    # 1. Extract Entities: (text, type)
+                    for e in graph.get("entities") or []:
                         if isinstance(e, dict):
-                            txt = normalizar_texto(e.get("text"))
-                            tipo = normalizar_texto(e.get("type"))
+                            txt = normalize_text(e.get("text"))
+                            entity_type = normalize_text(e.get("type"))
                             if txt:
-                                entidades.add((txt, tipo))
+                                entities.add((txt, entity_type))
 
-                    # 2. Extrair Relações: (sujeito, relação, objeto)
-                    for r in grafo.get("relations") or []:
+                    # 2. Extract Relations: (subject, relation, object)
+                    for r in graph.get("relations") or []:
                         if isinstance(r, dict):
-                            subj = normalizar_texto(r.get("subject"))
-                            rel = normalizar_texto(r.get("relation"))
-                            obj = normalizar_texto(r.get("object"))
+                            subj = normalize_text(r.get("subject"))
+                            rel = normalize_text(r.get("relation"))
+                            obj = normalize_text(r.get("object"))
                             if subj and obj:
-                                relacoes.add((subj, rel, obj))
+                                relations.add((subj, rel, obj))
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-        return entidades, relacoes
+        return entities, relations
     except Exception as e:
-        print(f"[Erro] Falha ao processar {caminho_csv}: {e}")
+        print(f"[Error] Failed to process {csv_path}: {e}")
         return set(), set()
 
 
-def calcular_metricas(tp, fp, fn):
+def calculate_metrics(tp, fp, fn):
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
     return precision, recall, f1
 
 
-def avaliar_modelo(caminho_gabarito, caminho_ia, nome_teste):
+def evaluate_model(gold_standard_path, ai_path, test_name):
     print("\n" + "=" * 60)
-    print(f"📊 RESULTADOS: {nome_teste}")
+    print(f"RESULTS: {test_name}")
     print("=" * 60)
 
-    if not os.path.exists(caminho_ia):
-        print(f"⚠️ Arquivo da IA não existe: {caminho_ia}")
+    if not os.path.exists(ai_path):
+        print(f"JSON file does not exist: {ai_path}")
         return 0, 0, 0, 0, 0, 0
 
-    gold_ents, gold_rels = extrair_conjuntos(caminho_gabarito)
-    ai_ents, ai_rels = extrair_conjuntos(caminho_ia)
+    gold_ents, gold_rels = extract_sets(gold_standard_path)
+    ai_ents, ai_rels = extract_sets(ai_path)
 
     if not gold_ents and not gold_rels:
-        print("[!] Aviso: O Gabarito está vazio ou não pôde ser lido.")
+        print("The Gold Standard is empty or could not be read.")
         return 0, 0, 0, 0, 0, 0
 
-    # NER (Entidades)
+    # NER (Entities)
     tp_ent = len(gold_ents.intersection(ai_ents))
     fp_ent = len(ai_ents - gold_ents)
     fn_ent = len(gold_ents - ai_ents)
-    p_ent, r_ent, f1_ent = calcular_metricas(tp_ent, fp_ent, fn_ent)
+    p_ent, r_ent, f1_ent = calculate_metrics(tp_ent, fp_ent, fn_ent)
 
-    # RE (Relações)
+    # RE (Relations)
     tp_rel = len(gold_rels.intersection(ai_rels))
     fp_rel = len(ai_rels - gold_rels)
     fn_rel = len(gold_rels - ai_rels)
-    p_rel, r_rel, f1_rel = calcular_metricas(tp_rel, fp_rel, fn_rel)
+    p_rel, r_rel, f1_rel = calculate_metrics(tp_rel, fp_rel, fn_rel)
 
-    print("\n--- 1. NER (Reconhecimento de Entidades) ---")
-    print(f"✅ Acertos (TP): {tp_ent} | ❌ Alucinações (FP): {fp_ent} | ⚠️ Omissões (FN): {fn_ent}")
-    print(f"-> Precisão: {p_ent:.2%} | Recall: {r_ent:.2%} | F1-Score: {f1_ent:.2%}")
+    print("\n--- 1. NER (Named Entity Recognition) ---")
+    print(f"True Positives (TP): {tp_ent} | False Positives (FP): {fp_ent} | False Negatives (FN): {fn_ent}")
+    print(f"-> Precision: {p_ent:.2%} | Recall: {r_ent:.2%} | F1-Score: {f1_ent:.2%}")
 
-    print("\n--- 2. RE (Extração de Relações) ---")
-    print(f"✅ Acertos (TP): {tp_rel} | ❌ Alucinações (FP): {fp_rel} | ⚠️ Omissões (FN): {fn_rel}")
-    print(f"-> Precisão: {p_rel:.2%} | Recall: {r_rel:.2%} | F1-Score: {f1_rel:.2%}\n")
+    print("\n--- 2. RE (Relation Extraction) ---")
+    print(f"True Positives (TP): {tp_rel} | False Positives (FP): {fp_rel} | False Negatives (FN): {fn_rel}")
+    print(f"-> Precision: {p_rel:.2%} | Recall: {r_rel:.2%} | F1-Score: {f1_rel:.2%}\n")
 
     return p_ent, r_ent, f1_ent, p_rel, r_rel, f1_rel
 
 
-def gerar_grafico_metricas_rosa(lista_resultados, caminho_saida="grafico_metricas_rosa.png"):
-    """Gera o gráfico comparativo em tons de rosa com os resultados passados."""
-    if not lista_resultados:
-        print("[!] Nenhum dado de métrica fornecido para gerar o gráfico.")
+def generate_metrics_chart(results_list, output_path="metrics_chart.png"):
+    if not results_list:
+        print("No metric data provided to generate the chart.")
         return
 
-    df = pd.DataFrame(lista_resultados)
+    df = pd.DataFrame(results_list)
     sns.set_theme(style="whitegrid", font="sans-serif")
 
     fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
-    paleta_rosa = ["#FFB6C1", "#FF69B4", "#C71585", "#DB7093"]
+    pink_palette = ["#FFB6C1", "#FF69B4", "#C71585", "#DB7093"]
 
     barplot = sns.barplot(
         data=df,
-        x="Configuração",
-        y="Valor",
-        hue="Métrica",
-        palette=paleta_rosa,
+        x="Configuration",
+        y="Value",
+        hue="Metric",
+        palette=pink_palette,
         edgecolor="#8B004F",
         linewidth=0.8,
         ax=ax,
     )
 
-    plt.title("Ablation Study — Desempenho de Extração de Informação", fontsize=14, fontweight="bold", pad=18, color="#4A0E2E")
-    plt.xlabel("Configuração (Modelo + Prompt)", fontsize=11, fontweight="bold", color="#4A0E2E", labelpad=10)
-    plt.ylabel("Pontuação (%)", fontsize=11, fontweight="bold", color="#4A0E2E", labelpad=10)
+    plt.title("Ablation Study — Information Extraction Performance", fontsize=14, fontweight="bold", pad=18, color="#4A0E2E")
+    plt.xlabel("Configuration (Model + Prompt)", fontsize=11, fontweight="bold", color="#4A0E2E", labelpad=10)
+    plt.ylabel("Score (%)", fontsize=11, fontweight="bold", color="#4A0E2E", labelpad=10)
     plt.ylim(0, 105)
 
     for p in barplot.patches:
-        altura = p.get_height()
-        if altura > 0:
+        height = p.get_height()
+        if height > 0:
             barplot.annotate(
-                f"{altura:.1f}%",
-                (p.get_x() + p.get_width() / 2.0, altura),
+                f"{height:.1f}%",
+                (p.get_x() + p.get_width() / 2.0, height),
                 ha="center",
                 va="bottom",
                 fontsize=8,
@@ -153,57 +150,56 @@ def gerar_grafico_metricas_rosa(lista_resultados, caminho_saida="grafico_metrica
     plt.xticks(rotation=15, ha="right", fontsize=9, color="#4A0E2E")
     plt.yticks(color="#4A0E2E")
 
-    legend = ax.legend(title="Métricas", frameon=True, facecolor="#FFF0F5", edgecolor="#FFB6C1")
+    legend = ax.legend(title="Metrics", frameon=True, facecolor="#FFF0F5", edgecolor="#FFB6C1")
     legend.get_title().set_color("#4A0E2E")
     legend.get_title().set_fontweight("bold")
 
     plt.tight_layout()
-    plt.savefig(caminho_saida, dpi=300, bbox_inches="tight")
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
-    print(f"✨ Gráfico rosa gerado com sucesso em: {caminho_saida}")
+    print(f"Chart generated successfully at: {output_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Validação de Grafos de Conhecimento com Métricas de NER e RE")
+    parser = argparse.ArgumentParser(description="Knowledge Graph Validation with NER and RE Metrics")
     
     parser.add_argument(
-        "--gabarito", "-g", 
+        "--gold-standard", "-g", 
         required=True, 
-        help="Caminho para o CSV do Gabarito (Gold Standard)"
+        help="Path to the Gold Standard CSV"
     )
     parser.add_argument(
-        "--entrada", "-i", 
+        "--input", "-i", 
         nargs="+", 
         required=True, 
-        help="Um ou mais arquivos CSVs gerados pelos modelos/prompts"
+        help="One or more CSV files generated by the models/prompts"
     )
     parser.add_argument(
-        "--saida-grafico", "-o", 
-        default="grafico_metricas_rosa.png", 
-        help="Caminho para salvar o gráfico de saída (padrão: grafico_metricas_rosa.png)"
+        "--output-chart", "-o", 
+        default="metrics_chart.png", 
+        help="Path to save the output chart (default: metrics_chart.png)"
     )
 
     args = parser.parse_args()
 
-    historico_metricas = []
+    metrics_history = []
 
-    for caminho_ia in args.entrada:
-        # Pega apenas o nome limpo do arquivo para a legenda do gráfico
-        nome_arquivo = Path(caminho_ia).stem
-        nome_config = nome_arquivo.replace("grafos_extraidos_", "")
+    for ai_path in args.input:
+        file_name = Path(ai_path).stem
+        config_name = file_name.replace("grafos_extraidos_", "")
 
-        p_ent, r_ent, f1_ent, p_rel, r_rel, f1_rel = avaliar_modelo(
-            args.gabarito, caminho_ia, nome_config
+        p_ent, r_ent, f1_ent, p_rel, r_rel, f1_rel = evaluate_model(
+            args.gold_standard, ai_path, config_name
         )
 
         if any([p_ent, r_ent, f1_ent, f1_rel]):
-            historico_metricas.extend([
-                {"Configuração": nome_config, "Métrica": "Precision (NER)", "Valor": p_ent * 100},
-                {"Configuração": nome_config, "Métrica": "Recall (NER)", "Valor": r_ent * 100},
-                {"Configuração": nome_config, "Métrica": "F1-Score (NER)", "Valor": f1_ent * 100},
-                {"Configuração": nome_config, "Métrica": "F1-Score (RE)", "Valor": f1_rel * 100},
+            metrics_history.extend([
+                {"Configuration": config_name, "Metric": "Precision (NER)", "Value": p_ent * 100},
+                {"Configuration": config_name, "Metric": "Recall (NER)", "Value": r_ent * 100},
+                {"Configuration": config_name, "Metric": "F1-Score (NER)", "Value": f1_ent * 100},
+                {"Configuration": config_name, "Metric": "F1-Score (RE)", "Value": f1_rel * 100},
             ])
 
-    if historico_metricas:
-        gerar_grafico_metricas_rosa(historico_metricas, caminho_saida=args.saida_grafico)
+    if metrics_history:
+        generate_metrics_chart(metrics_history, output_path=args.output_chart)
