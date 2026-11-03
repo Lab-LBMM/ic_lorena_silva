@@ -10,11 +10,11 @@ from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 # ==========================================
-# 1. CONFIGURATIONS AND HTTP CLIENT
+# 1. CONFIGURATIONS AND HTTP CLIENT"deepseek-r1:1.5b""qwen2.5", "llama3.1", "mistral-nemo", 
 # ==========================================
-MODELS = ["qwen2.5", "llama3.1", "mistral-nemo", "deepseek-r1:1.5b", "gemma2"]
+MODELS = ["gemma2"]
 SHOT_MODE = "few_shot"         # 'zero_shot' or 'few_shot'
-DECOMPOSED_PIPELINE = False    # If True, runs NER and RE in 2 separate API calls
+DECOMPOSED_PIPELINE = True    # If True, runs NER and RE in 2 separate API calls
 
 BLOCK_SIZE = 2200              # Reduced to avoid overflow in dense texts
 SENTENCE_OVERLAP = 1     
@@ -198,7 +198,6 @@ def extract_two_stages_decomposed(block, model_id):
     Stage 1: Identifies Entities only (NER).
     Stage 2: Receives the block + Entities extracted in Stage 1 and identifies Relations (RE).
     """
-    # --- STAGE 1: NER ---
     prompt_ner = f"Extract ONLY valid biological entities from the text.\n{BASE_ONTOLOGY}\nOutput ONLY valid JSON."
     messages_ner = [{"role": "system", "content": prompt_ner}, {"role": "user", "content": f"<text>{block}</text>"}]
     
@@ -219,7 +218,6 @@ def extract_two_stages_decomposed(block, model_id):
     if not found_entities:
         return {"entities": [], "relations": []}, None
 
-    # --- STAGE 2: RE ---
     prompt_re = f"""Given the following text AND the pre-extracted entities, identify ONLY valid relationships between these entities.
 
 Extracted Entities: {json.dumps(found_entities)}
@@ -290,7 +288,45 @@ def merge_validated_results(data_list):
     return {"entities": list(entities.values()), "relations": list(relations.values())}
 
 # ==========================================
-# 5. GRID SEARCH LOOP
+# 5. EXECUTION TIME REPORTING FUNCTION
+# ==========================================
+def print_model_execution_summary(model_timings, total_articles):
+    """
+    Exibe um relatório estruturado no terminal com o tempo total de execução 
+    e o tempo médio por execução (5 artigos × 3 prompts = 15 corridas por modelo).
+    """
+    print("\n" + "=" * 78)
+    print("⏱️  RELATÓRIO DE TEMPO DE EXECUÇÃO POR MODELO (GRID SEARCH)")
+    print("=" * 78)
+    print(f"{'Modelo':<20} | {'Tempo Total':<16} | {'Média / Execução':<18} | {'Detalhes das Execuções'}")
+    print("-" * 78)
+
+    for model, stats in model_timings.items():
+        total_s = stats["total_seconds"]
+        prompts_count = stats["prompts_count"]
+        total_runs = total_articles * prompts_count  # 5 artigos × 3 prompts = 15 execuções
+        
+        # Formata o tempo total (horas, minutos, segundos)
+        mins, secs = divmod(total_s, 60)
+        hours, mins = divmod(mins, 60)
+        if hours > 0:
+            tempo_fmt = f"{int(hours)}h {int(mins)}m {secs:.1f}s"
+        elif mins > 0:
+            tempo_fmt = f"{int(mins)}m {secs:.1f}s"
+        else:
+            tempo_fmt = f"{secs:.2f}s"
+
+        # Tempo médio por execução de artigo
+        avg_s = total_s / total_runs if total_runs > 0 else 0
+        avg_fmt = f"{avg_s:.2f}s / artigo"
+
+        detalhes = f"{total_runs} rodadas ({total_articles} art. × {prompts_count} prompts)"
+        print(f"{model:<20} | {tempo_fmt:<16} | {avg_fmt:<18} | {detalhes}")
+
+    print("=" * 78 + "\n")
+
+# ==========================================
+# 6. GRID SEARCH LOOP
 # ==========================================
 def _safe_text(v): return "" if pd.isna(v) else str(v)
 
@@ -303,9 +339,15 @@ def run_grid_search(db_path, article_limit=5):
     df_articles = pd.read_sql_query(f"SELECT pmcid, pmid, title, abstract, content FROM pcw_literature LIMIT {int(article_limit)}", conn)
     conn.close()
 
+    total_articles = len(df_articles)
+    model_timings = {}
+
     for model in MODELS:
         ensure_local_model(model)
         _slug = model.replace(":", "_")
+        
+        # Início da contagem de tempo total do modelo para todas as 15 execuções (5 artigos x 3 prompts)
+        start_model_time = time.time()
 
         for prompt_name, prompt_text in PROMPTS.items():
             print(f"\n" + "="*50)
@@ -327,7 +369,7 @@ def run_grid_search(db_path, article_limit=5):
                 pmcid = str(row["pmcid"])
                 if pmcid in processed_articles: continue
 
-                print(f"\n[{idx+1}/{len(df_articles)}] PMCID: {pmcid}")
+                print(f"\n[{idx+1}/{total_articles}] PMCID: {pmcid}")
                 text = f"{_safe_text(row['abstract'])}\n\n{_safe_text(row['content'])}".strip()
                 blocks = split_text_into_blocks(text)
 
@@ -382,6 +424,16 @@ def run_grid_search(db_path, article_limit=5):
                 else:
                     _append_csv(failed_file, row_data)
                     print(f"  -> Saved to failed files.")
+
+        # Registra o tempo acumulado das 15 execuções (5 artigos x 3 prompts)
+        elapsed_model_time = round(time.time() - start_model_time, 2)
+        model_timings[model] = {
+            "total_seconds": elapsed_model_time,
+            "prompts_count": len(PROMPTS)
+        }
+
+    # Imprime a tabela sumarizada no final do benchmark
+    print_model_execution_summary(model_timings, total_articles)
 
 if __name__ == "__main__":
     run_grid_search(db_path="data/data_base/literature.db", article_limit=5)
