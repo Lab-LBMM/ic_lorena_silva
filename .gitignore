@@ -1,5 +1,6 @@
-data/raw/*
+data/*
 *.gz
 __pycache__/
 *.pyc
 .venv/
+results/logs/*
