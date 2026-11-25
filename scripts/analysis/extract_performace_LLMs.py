@@ -3,6 +3,7 @@ import csv
 import json
 import os
 from pathlib import Path
+import re
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
@@ -104,7 +105,7 @@ def evaluate_model(gold_standard_path, ai_path, test_name):
     return p_ent, r_ent, f1_ent, p_rel, r_rel, f1_rel
 
 
-def generate_metrics_chart(results_list, output_path="metrics_chart.png"):
+def generate_metrics_chart(results_list, output_path="metrics_chart.png", subtitle=""):
     if not results_list:
         print("No metric data provided to generate the chart.")
         return
@@ -126,8 +127,12 @@ def generate_metrics_chart(results_list, output_path="metrics_chart.png"):
         ax=ax,
     )
 
-    plt.title("Ablation Study — Information Extraction Performance", fontsize=14, fontweight="bold", pad=18, color="#4A0E2E")
-    plt.xlabel("Configuration (Model + Prompt)", fontsize=11, fontweight="bold", color="#4A0E2E", labelpad=10)
+    # Título principal + Subtítulo dinâmico extraído dos arquivos
+    main_title = "Ablation Study — Information Extraction Performance"
+    full_title = f"{main_title}\n({subtitle})" if subtitle else main_title
+
+    plt.title(full_title, fontsize=13, fontweight="bold", pad=18, color="#4A0E2E", loc="center")
+    plt.xlabel("Models", fontsize=11, fontweight="bold", color="#4A0E2E", labelpad=10)
     plt.ylabel("Score (%)", fontsize=11, fontweight="bold", color="#4A0E2E", labelpad=10)
     plt.ylim(0, 105)
 
@@ -150,7 +155,15 @@ def generate_metrics_chart(results_list, output_path="metrics_chart.png"):
     plt.xticks(rotation=15, ha="right", fontsize=9, color="#4A0E2E")
     plt.yticks(color="#4A0E2E")
 
-    legend = ax.legend(title="Metrics", frameon=True, facecolor="#FFF0F5", edgecolor="#FFB6C1")
+    # Legenda jogada para fora da área do gráfico (à direita)
+    legend = ax.legend(
+        title="Metrics", 
+        frameon=True, 
+        facecolor="#FFF0F5", 
+        edgecolor="#FFB6C1",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1)
+    )
     legend.get_title().set_color("#4A0E2E")
     legend.get_title().set_fontweight("bold")
 
@@ -184,10 +197,26 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     metrics_history = []
+    prompt_info = ""
 
     for ai_path in args.input:
         file_name = Path(ai_path).stem
-        config_name = file_name.replace("grafos_extraidos_", "")
+        
+        match = re.search(r'grafos_extraidos_(.*?)_(P\d+_[a-zA-Z_]+)_(zero_shot|few_shot)', file_name, re.IGNORECASE)
+        
+        if match:
+            model_raw = match.group(1)
+            prompt_raw = match.group(2)
+            shot_raw = match.group(3)
+            
+            config_name = model_raw.replace("_", " ").title()
+            
+            prompt_type_fmt = prompt_raw.replace("_", " ")
+            shot_type_fmt = shot_raw.replace("_", " ").title()
+            prompt_info = f"Prompt: {prompt_type_fmt} | {shot_type_fmt}"
+        else:
+            config_name = file_name.replace("grafos_extraidos_", "")
+            prompt_info = "Avaliação de Modelos"
 
         p_ent, r_ent, f1_ent, p_rel, r_rel, f1_rel = evaluate_model(
             args.gold_standard, ai_path, config_name
@@ -202,4 +231,4 @@ if __name__ == "__main__":
             ])
 
     if metrics_history:
-        generate_metrics_chart(metrics_history, output_path=args.output_chart)
+        generate_metrics_chart(metrics_history, output_path=args.output_chart, subtitle=prompt_info)

@@ -1,10 +1,6 @@
-data/raw/*
+data/*
 *.gz
 __pycache__/
 *.pyc
 .venv/
-*.csv
-*.jsonl
-*.txt
-artigos_para_leitura.md
-*.png
+results/logs/*
